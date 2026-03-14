@@ -2,12 +2,12 @@
 
 _Transparent N-tier FUSE storage for media-heavy workloads._
 
-[![Go 1.22](https://img.shields.io/badge/go-1.22-00ADD8?style=flat-square&logo=go)](https://go.dev)
+[![Go 1.26](https://img.shields.io/badge/go-1.24-00ADD8?style=flat-square&logo=go)](https://go.dev)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 [![Go Report Card](https://goreportcard.com/badge/github.com/mikey-austin/tierfs?style=flat-square)](https://goreportcard.com/report/github.com/mikey-austin/tierfs)
 [![pkg.go.dev](https://img.shields.io/badge/pkg.go.dev-reference-007d9c?style=flat-square)](https://pkg.go.dev/github.com/mikey-austin/tierfs)
 
-TierFS is a FUSE daemon that presents a single unified filesystem path to applications while transparently tiering file data across any number of storage backends — local SSD, NAS over NFS, and S3-compatible object storage (MinIO, Ceph RGW, Backblaze B2). Files are written to the fastest tier and migrated to slower, cheaper storage automatically according to age-based rules and capacity pressure, with digest-verified copies ensuring data integrity throughout.
+TierFS is a FUSE daemon that presents a single unified filesystem path to applications while transparently tiering file data across any number of storage backends — local SSD, NAS over NFS, SFTP, SMB/CIFS shares, and S3-compatible object storage (MinIO, Ceph RGW, Backblaze B2). Files are written to the fastest tier and migrated to slower, cheaper storage automatically according to age-based rules and capacity pressure, with digest-verified copies ensuring data integrity throughout.
 
 It was built for surveillance and media workloads where data arrives at high volume, must be immediately accessible, but has a known access cliff — Frigate NVR clips are replayed in the first 48 hours and rarely touched again. TierFS makes that operational reality a configuration option, not an application concern. Any process that can write files works with TierFS without modification.
 
@@ -17,26 +17,29 @@ It was built for surveillance and media workloads where data arrives at high vol
 |---|---|
 | **Transparent FUSE mount** | Applications see a single path; all tiering is invisible |
 | **N-tier policy engine** | Unlimited tiers with per-rule TOML eviction schedules |
-| **Multiple backend types** | `file://` (local, NFS, SMB) and `s3://` (MinIO, Ceph, AWS, Backblaze) |
+| **5 backend types** | `file://` (local/NFS), `s3://` (MinIO, Ceph, AWS, B2), `sftp://`, `smb://`, `null://` (discard) |
+| **Transform pipeline** | Pluggable compression (gzip, zstd) and AES-256-GCM encryption; ordering enforced automatically |
 | **Digest verification** | xxhash3-128 (>30 GB/s with SIMD) confirms copy integrity |
-| **Async replication** | Configurable worker pool with retry; writes never block |
+| **Async replication** | Configurable worker pool with retry and write-quiescence guard; writes never block |
 | **Capacity pressure eviction** | Threshold/headroom watermarks trigger oldest-first eviction |
 | **Promote on read** | Cold files pulled back to hot tier transparently on access |
 | **Pin tier** | Named files or directories exempted from auto-eviction |
-| **Structured observability** | 16 Prometheus metrics, OpenTelemetry tracing, zap JSON logs |
+| **Write guard** | Configurable quiescence window prevents replication of in-progress multi-phase writes |
+| **Structured observability** | 22 Prometheus metrics, OpenTelemetry tracing, zap JSON logs with rotation |
+| **Admin UI** | React SPA for monitoring tier status, replication, and eviction activity |
 | **Hexagonal architecture** | Domain ports; adapters injected at startup; fully testable |
 
 ## How It Works
 
 ```
 ┌─────────────────────────────────────────────────┐
-│  Application (Frigate, Immich, ffmpeg, …)        │
+│  Application (Frigate, Immich, ffmpeg, ...)      │
 │  writes/reads /share/CCTV                        │
 └──────────────────────┬──────────────────────────┘
                        │ FUSE syscalls
 ┌──────────────────────▼──────────────────────────┐
 │  TierFS FUSE layer  (hanwen/go-fuse/v2)          │
-│  pathfs.FileSystem → TierService                 │
+│  pathfs.FileSystem -> TierService                │
 └────────┬──────────────────────┬─────────────────┘
          │ writes               │ reads
     ┌────▼────┐            ┌────▼────┐
@@ -44,10 +47,11 @@ It was built for surveillance and media workloads where data arrives at high vol
     │  SSD    │            │ or stage │ (remote: copy to /tmp)
     └────┬────┘            └─────────┘
          │ async replication (Replicator worker pool)
-    ┌────▼────┐    ┌────────┐    ┌──────────┐
-    │  tier1  │    │  tier2 │    │  tier3   │
-    │  NAS    │    │  MinIO │    │ Backblaze│
-    └─────────┘    └────────┘    └──────────┘
+    ┌────▼────┐    ┌────────┐    ┌──────────┐    ┌────────┐
+    │  tier1  │    │  tier2 │    │  tier3   │    │ tier4  │
+    │NAS/SFTP │    │ MinIO  │    │ Backblaze│    │ null://│
+    │  /SMB   │    │        │    │          │    │(discard)│
+    └─────────┘    └────────┘    └──────────┘    └────────┘
          ▲
     Evictor loop (age schedule + capacity pressure)
     deletes from hot tier once cold copy is verified
@@ -56,6 +60,16 @@ It was built for surveillance and media workloads where data arrives at high vol
 - **Writes** always land on the hottest tier (priority 0) and are enqueued for async replication.
 - **Reads** are served from the lowest-priority tier that has a verified local copy; remote-only files are staged to a local temp directory transparently.
 - **Eviction** removes files from a tier once the next tier has a digest-verified copy and the configured `after` age has elapsed.
+
+## Supported Backends
+
+| Scheme | Implementation | Notes |
+|---|---|---|
+| `file://` | Local/NFS filesystem | Atomic writes, zero-copy FUSE reads via `LocalPath`, empty-dir pruning |
+| `s3://` | AWS SDK v2 | MinIO, Ceph RGW, Backblaze B2 via `endpoint` + `path_style`; multipart upload for large files |
+| `sftp://` | `pkg/sftp` over `x/crypto/ssh` | SSH agent, key file, or password auth; auto-reconnect; atomic temp-file writes |
+| `smb://` | `go-smb2` (pure Go) | SMB2/3; NTLM auth; auto-reconnect on transport errors; atomic rename |
+| `null://` | Stateless discard | Terminal tier; implements `Finalizer` to purge metadata on eviction |
 
 ## Quick Start
 
@@ -142,10 +156,13 @@ evict_schedule = [{after = "48h", to = "tier1"}]
 ### From Source
 
 ```bash
-go install github.com/mikey-austin/tierfs/cmd/tierfs@latest
+git clone https://github.com/mikey-austin/tierfs.git
+cd tierfs
+go mod download
+make build        # -> bin/tierfs
 ```
 
-Requires Go 1.22+, `gcc` (for CGO/SQLite), and `libfuse3-dev` on Linux.
+Requires Go 1.26+, `gcc` (for CGO/SQLite), and `libfuse3-dev` on Linux.
 
 ### Docker
 
@@ -161,6 +178,25 @@ Download from [GitHub Releases](https://github.com/mikey-austin/tierfs/releases/
 curl -Lo tierfs https://github.com/mikey-austin/tierfs/releases/latest/download/tierfs-linux-amd64
 chmod +x tierfs
 sudo mv tierfs /usr/local/bin/
+```
+
+## Running
+
+```bash
+# Copy and edit the example config
+cp tierfs.example.toml /etc/tierfs/tierfs.toml
+
+# Run the daemon
+./bin/tierfs -config /etc/tierfs/tierfs.toml
+```
+
+### Docker
+
+```bash
+docker run --cap-add SYS_ADMIN --device /dev/fuse \
+  -v /etc/tierfs/tierfs.toml:/etc/tierfs/tierfs.toml:ro \
+  -v /share/CCTV:/share/CCTV:shared \
+  -p 9100:9100 tierfs
 ```
 
 ## Configuration
@@ -180,11 +216,52 @@ match          = "recordings/**"
 evict_schedule = [{after = "24h", to = "tier1"}]
 ```
 
-Rules are evaluated in declaration order; the first match wins. A catch-all `match = "**"` rule at the end is required. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for the complete field reference, S3 backend configuration, credential handling, and four production-ready example configs.
+Rules are evaluated in declaration order; the first match wins. A catch-all `match = "**"` rule at the end is required.
+
+### Backend-Specific Configuration
+
+**S3** — set `endpoint` and `path_style = true` for MinIO/Ceph. Credentials via `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` environment variables.
+
+**SFTP** — authentication tries SSH agent, then key file (`TIERFS_SFTP_KEY_PATH` env or `~/.ssh/id_ed25519`), then password (`TIERFS_SFTP_PASS` env). Set `sftp_host_key` for host key verification in production (use `ssh-keyscan`).
+
+**SMB** — credentials via `TIERFS_SMB_USER`/`TIERFS_SMB_PASS` environment variables, config fields, or URI userinfo (in that priority order).
+
+**Transforms** — add a `[transform]` section to any backend for compression and/or encryption:
+
+```toml
+[[backend]]
+name = "encrypted-nas"
+uri  = "file:///mnt/nas/CCTV"
+
+[backend.transform]
+compression = "zstd"                    # "gzip" or "zstd"
+encryption_key = "base64-encoded-key"   # AES-256-GCM
+```
+
+Compression is always applied before encryption regardless of config order. See [tierfs.example.toml](tierfs.example.toml) for a full reference config.
+
+## Admin UI
+
+A React-based admin dashboard is included for monitoring tier status, replication progress, and eviction activity.
+
+```bash
+cd web/admin
+npm install
+npm run dev          # dev server on :3000
+npm run build        # production build -> web/admin/dist/
+```
+
+Or via Make:
+
+```bash
+make ui              # npm install + npm run build
+```
+
+The UI currently uses simulated data. See `web/admin/README.md` for the API surface to implement for live data.
 
 ## Observability
 
-TierFS exposes 16 Prometheus metrics at `:9100/metrics` across five subsystems: `backend`, `meta`, `replication`, `eviction`, and `fuse`. Key signals:
+TierFS exposes 22 Prometheus metrics at `:9100/metrics` across six subsystems: `backend`, `meta`, `replication`, `eviction`, `fuse`, and `tier`.
 
 ```promql
 # Replication success rate
@@ -194,13 +271,13 @@ rate(tierfs_replication_jobs_total{outcome="ok"}[5m])
 # Queue backlog
 tierfs_replication_queue_depth
 
-# Hot tier fullness (requires node_exporter for actual disk usage)
+# Hot tier fullness
 tierfs_tier_bytes_used{tier="tier0"}
 ```
 
-Health endpoint: `GET http://localhost:9100/healthz` → `200 ok`
+Health endpoint: `GET http://localhost:9100/healthz` -> `200 ok`
 
-All log output is structured JSON via zap:
+All log output is structured JSON via zap with automatic rotation via lumberjack:
 
 ```json
 {"ts":"2026-03-13T19:32:43.123Z","level":"info","logger":"tier-service.replicator",
@@ -208,7 +285,59 @@ All log output is structured JSON via zap:
  "from":"file:///data/tier0/...","to":"s3://nvr-archive/...","attempt":1}
 ```
 
+OpenTelemetry OTLP tracing is available for Jaeger, Grafana Tempo, etc. Enable via the `[observability.tracing]` config section.
+
 See [docs/OPERATIONS.md](docs/OPERATIONS.md) for the full metrics reference, alerting rules, Grafana dashboard config, and troubleshooting runbook.
+
+## Architecture
+
+```
+cmd/tierfs/main.go          Composition root; wires all adapters
+        |
+        | injects
+   +----|----+----------------------------+
+   |         |                            |
+   v         v                            v
+ fuse     app/TierService             observability/Stack
+ adapter  app/Replicator              decorators wrapping
+ (pathfs)  app/Evictor                all domain ports
+           app/WriteGuard
+        |
+        | calls domain ports
+   +----|----+-------------------+
+   |                             |
+   v                             v
+ domain.Backend              domain.MetadataStore
+ (interface / port)          (interface / port)
+   |                             |
+   v                             v
+ adapters/storage/           adapters/meta/sqlite/
+   file.Backend                sqlite.Store (WAL mode)
+   s3.Backend
+   sftp.Backend
+   smb.Backend
+   null.Backend
+   transform.TransformBackend
+```
+
+The key rule: `internal/domain/` imports only Go stdlib. Nothing in domain knows about SQLite, FUSE, S3, SFTP, or SMB. All dependencies point inward.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the complete system design, data flow diagrams, port interfaces, concurrency model, and design decisions.
+
+## Development
+
+```bash
+make build           # compile bin/tierfs
+make test            # unit + integration tests
+make test-unit       # unit tests only with race detector
+make bench           # run benchmarks
+make lint            # golangci-lint
+make fmt             # gofmt
+make vet             # go vet
+make ui              # build admin UI
+make docker          # build Docker image
+make clean           # remove build artifacts
+```
 
 ## Use Cases
 
@@ -224,4 +353,4 @@ Contributions are welcome — bug reports, documentation improvements, new stora
 
 ## License
 
-MIT © 2026 mikey-austin — see [LICENSE](LICENSE).
+MIT (c) 2026 mikey-austin — see [LICENSE](LICENSE).
