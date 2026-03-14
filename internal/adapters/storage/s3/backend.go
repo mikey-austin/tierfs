@@ -56,11 +56,37 @@ func ParseURI(rawURI string) (bucket, prefix string, err error) {
 	return bucket, prefix, nil
 }
 
+// s3API abstracts the subset of *s3.Client used by Backend, enabling unit tests
+// with mock implementations.
+type s3API interface {
+	GetObject(ctx context.Context, in *s3.GetObjectInput, opts ...func(*s3.Options)) (*s3.GetObjectOutput, error)
+	HeadObject(ctx context.Context, in *s3.HeadObjectInput, opts ...func(*s3.Options)) (*s3.HeadObjectOutput, error)
+	DeleteObject(ctx context.Context, in *s3.DeleteObjectInput, opts ...func(*s3.Options)) (*s3.DeleteObjectOutput, error)
+	ListObjectsV2(ctx context.Context, in *s3.ListObjectsV2Input, opts ...func(*s3.Options)) (*s3.ListObjectsV2Output, error)
+}
+
+// s3Uploader abstracts the S3 multipart uploader.
+type s3Uploader interface {
+	Upload(ctx context.Context, in *s3.PutObjectInput, opts ...func(*manager.Uploader)) (*manager.UploadOutput, error)
+}
+
 // Backend is an S3-compatible storage backend.
 type Backend struct {
 	cfg      Config
-	client   *s3.Client
-	uploader *manager.Uploader
+	client   s3API
+	uploader s3Uploader
+}
+
+// newForTest creates a Backend with injected dependencies for unit testing.
+func newForTest(bucket, prefix string, api s3API, up s3Uploader) *Backend {
+	return &Backend{
+		cfg: Config{
+			Bucket: bucket,
+			Prefix: prefix,
+		},
+		client:   api,
+		uploader: up,
+	}
 }
 
 // New creates a Backend, establishing the AWS client with the provided config.

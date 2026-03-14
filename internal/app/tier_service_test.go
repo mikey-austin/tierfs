@@ -527,3 +527,116 @@ func TestTierService_UsedBytes(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(3000), used)
 }
+
+// ── Rename fallback and failure stubs ────────────────────────────────────────
+
+// failingRenameBackend implements domain.Renamer but always fails Rename.
+// Other operations delegate to the embedded memBackend.
+type failingRenameBackend struct {
+	*memBackend
+}
+
+func (f *failingRenameBackend) Rename(_ context.Context, _, _ string) error {
+	return fmt.Errorf("native rename not supported")
+}
+
+// failingPutBackend wraps memBackend but fails all Put calls.
+type failingPutBackend struct {
+	*memBackend
+}
+
+func (f *failingPutBackend) Put(_ context.Context, _ string, r io.Reader, _ int64) error {
+	io.Copy(io.Discard, r) //nolint:errcheck
+	return domain.ErrBackendFailure
+}
+
+// ── Rename fallback tests ────────────────────────────────────────────────────
+
+func TestTierService_OnRename_FallbackCopyDelete(t *testing.T) {
+	cfg := makeConfig(t)
+	meta := newMemMeta()
+	ctx := context.Background()
+
+	inner := newMemBackend("tier0")
+	b0 := &failingRenameBackend{inner}
+	b1 := newMemBackend("tier1")
+	backends := map[string]domain.Backend{"tier0": b0, "tier1": b1}
+	log := zaptest.NewLogger(t)
+	ts := app.NewTierService(cfg, meta, backends, log)
+
+	// Seed data on tier0.
+	data := []byte("rename fallback data")
+	inner.mu.Lock()
+	inner.store["recordings/old.mp4"] = data
+	inner.mu.Unlock()
+
+	require.NoError(t, meta.UpsertFile(ctx, domain.File{
+		RelPath:     "recordings/old.mp4",
+		CurrentTier: "tier0",
+		State:       domain.StateLocal,
+	}))
+	require.NoError(t, meta.AddFileTier(ctx, domain.FileTier{
+		RelPath:  "recordings/old.mp4",
+		TierName: "tier0",
+	}))
+
+	// OnRename should succeed via copy+delete fallback despite Rename failing.
+	require.NoError(t, ts.OnRename(ctx, "recordings/old.mp4", "recordings/new.mp4"))
+
+	// Verify metadata: old key gone, new key present.
+	_, err := meta.GetFile(ctx, "recordings/old.mp4")
+	assert.ErrorIs(t, err, domain.ErrNotExist, "old metadata should be removed")
+
+	f, err := meta.GetFile(ctx, "recordings/new.mp4")
+	require.NoError(t, err)
+	assert.Equal(t, "recordings/new.mp4", f.RelPath)
+
+	// Verify backend: old key gone, new key present with correct data.
+	inner.mu.Lock()
+	_, hasOld := inner.store["recordings/old.mp4"]
+	got, hasNew := inner.store["recordings/new.mp4"]
+	inner.mu.Unlock()
+	assert.False(t, hasOld, "old key should be deleted from backend")
+	assert.True(t, hasNew, "new key should exist in backend")
+	assert.Equal(t, data, got, "content should be preserved")
+}
+
+func TestTierService_OnRename_CopyDeletePutFails(t *testing.T) {
+	cfg := makeConfig(t)
+	meta := newMemMeta()
+	ctx := context.Background()
+
+	// Use a backend where Get works (data is seeded) but Put fails.
+	inner := newMemBackend("tier0")
+	b0 := &failingPutBackend{inner}
+	b1 := newMemBackend("tier1")
+	backends := map[string]domain.Backend{"tier0": b0, "tier1": b1}
+	log := zaptest.NewLogger(t)
+	ts := app.NewTierService(cfg, meta, backends, log)
+
+	data := []byte("put will fail")
+	inner.mu.Lock()
+	inner.store["recordings/src.mp4"] = data
+	inner.mu.Unlock()
+
+	require.NoError(t, meta.UpsertFile(ctx, domain.File{
+		RelPath:     "recordings/src.mp4",
+		CurrentTier: "tier0",
+		State:       domain.StateLocal,
+	}))
+	require.NoError(t, meta.AddFileTier(ctx, domain.FileTier{
+		RelPath:  "recordings/src.mp4",
+		TierName: "tier0",
+	}))
+
+	err := ts.OnRename(ctx, "recordings/src.mp4", "recordings/dst.mp4")
+	assert.Error(t, err, "rename should fail when Put fails")
+
+	// Metadata must NOT be updated.
+	f, gerr := meta.GetFile(ctx, "recordings/src.mp4")
+	require.NoError(t, gerr)
+	assert.Equal(t, "recordings/src.mp4", f.RelPath, "original metadata should be unchanged")
+
+	_, gerr = meta.GetFile(ctx, "recordings/dst.mp4")
+	assert.ErrorIs(t, gerr, domain.ErrNotExist, "new path should not exist in metadata")
+}

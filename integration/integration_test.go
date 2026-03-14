@@ -10,15 +10,18 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
 	"go.uber.org/zap/zaptest"
 
 	"github.com/mikey-austin/tierfs/internal/adapters/meta/sqlite"
 	filerbackend "github.com/mikey-austin/tierfs/internal/adapters/storage/file"
+	"github.com/mikey-austin/tierfs/internal/adapters/storage/transform"
 	"github.com/mikey-austin/tierfs/internal/app"
 	"github.com/mikey-austin/tierfs/internal/config"
 	"github.com/mikey-austin/tierfs/internal/domain"
@@ -127,6 +130,114 @@ promote_on_read = false
 		tier1: b1,
 		svc:   svc,
 		cfg:   cfg,
+	}
+}
+
+type transformStack struct {
+	stack
+	tier1Raw *filerbackend.Backend // unwrapped tier1 for raw access
+}
+
+func newStackWithTransforms(t *testing.T) *transformStack {
+	t.Helper()
+	dir := t.TempDir()
+	tier0Root := filepath.Join(dir, "tier0")
+	tier1Root := filepath.Join(dir, "tier1")
+	metaDB := filepath.Join(dir, "meta.db")
+
+	toml := `
+[mount]
+path    = "` + filepath.Join(dir, "mount") + `"
+meta_db = "` + metaDB + `"
+
+[replication]
+workers = 2
+retry_interval = "100ms"
+max_retries = 3
+verify = "digest"
+
+[eviction]
+check_interval = "50ms"
+capacity_threshold = 0.90
+capacity_headroom  = 0.70
+
+[[backend]]
+name = "ssd"
+uri  = "file://` + tier0Root + `"
+
+[[backend]]
+name = "nas"
+uri  = "file://` + tier1Root + `"
+
+[[tier]]
+name     = "tier0"
+backend  = "ssd"
+priority = 0
+capacity = "1GiB"
+
+[[tier]]
+name     = "tier1"
+backend  = "nas"
+priority = 1
+capacity = "unlimited"
+
+[[rule]]
+name  = "instant-evict"
+match = "thumbnails/**"
+evict_schedule = [{after = "0s", to = "tier1"}]
+promote_on_read = false
+
+[[rule]]
+name  = "recordings"
+match = "recordings/**"
+evict_schedule = [{after = "10ms", to = "tier1"}]
+promote_on_read = false
+
+[[rule]]
+name  = "default"
+match = "**"
+evict_schedule = [{after = "1h", to = "tier1"}]
+promote_on_read = false
+`
+	f, err := os.CreateTemp(dir, "*.toml")
+	require.NoError(t, err)
+	f.WriteString(toml)
+	f.Close()
+
+	cfg, err := config.Load(f.Name())
+	require.NoError(t, err)
+
+	meta, err := sqlite.Open(metaDB)
+	require.NoError(t, err)
+	t.Cleanup(func() { meta.Close() })
+
+	b0, err := filerbackend.New(tier0Root)
+	require.NoError(t, err)
+
+	b1Raw, err := filerbackend.New(tier1Root)
+	require.NoError(t, err)
+
+	// Wrap tier1 with a zstd compression transform.
+	log := zaptest.NewLogger(t)
+	zstdT, err := transform.NewZstd(zstd.SpeedDefault)
+	require.NoError(t, err)
+	b1Wrapped := transform.New(b1Raw, transform.Pipeline(zstdT), log)
+
+	backends := map[string]domain.Backend{"tier0": b0, "tier1": b1Wrapped}
+
+	svc := app.NewTierService(cfg, meta, backends, log)
+	svc.Start()
+	t.Cleanup(svc.Stop)
+
+	return &transformStack{
+		stack: stack{
+			meta:  meta,
+			tier0: b0,
+			tier1: nil, // tier1 is wrapped; use tier1Raw for raw access
+			svc:   svc,
+			cfg:   cfg,
+		},
+		tier1Raw: b1Raw,
 	}
 }
 
@@ -331,4 +442,126 @@ func TestIntegration_MultipleFilesOnTier(t *testing.T) {
 	files, err := s.meta.ListFiles(ctx, "recordings/cam1")
 	require.NoError(t, err)
 	assert.Len(t, files, 5)
+}
+
+// ── Transform Tier Integration Tests ──────────────────────────────────────────
+
+func TestIntegration_TransformTier_WriteAndRead(t *testing.T) {
+	s := newStackWithTransforms(t)
+	ctx := context.Background()
+
+	relPath := "recordings/cam1/2026-03-13/clip.mp4"
+	data := bytes.Repeat([]byte("hello tierfs transform"), 1000)
+
+	// Write to tier0 (plain file://).
+	backend, tierName, err := s.svc.WriteTarget(relPath)
+	require.NoError(t, err)
+	assert.Equal(t, "tier0", tierName)
+
+	require.NoError(t, backend.Put(ctx, relPath, bytes.NewReader(data), int64(len(data))))
+	require.NoError(t, s.svc.OnWriteComplete(ctx, relPath, tierName, int64(len(data)), time.Now()))
+
+	// Wait for replication to compressed tier1.
+	require.Eventually(t, func() bool {
+		ok, _ := s.meta.IsTierVerified(ctx, relPath, "tier1")
+		return ok
+	}, 5*time.Second, 100*time.Millisecond, "file should be verified on tier1")
+
+	// Read back through the TierService — should decompress transparently.
+	f, err := s.meta.GetFile(ctx, relPath)
+	require.NoError(t, err)
+	assert.Equal(t, int64(len(data)), f.Size)
+	assert.NotEmpty(t, f.Digest)
+}
+
+func TestIntegration_TransformTier_ReplicationVerifiesDigest(t *testing.T) {
+	s := newStackWithTransforms(t)
+	ctx := context.Background()
+
+	relPath := "recordings/cam1/verified.mp4"
+	data := bytes.Repeat([]byte("digest verification"), 512)
+
+	backend, tierName, err := s.svc.WriteTarget(relPath)
+	require.NoError(t, err)
+	require.NoError(t, backend.Put(ctx, relPath, bytes.NewReader(data), int64(len(data))))
+	require.NoError(t, s.svc.OnWriteComplete(ctx, relPath, tierName, int64(len(data)), time.Now()))
+
+	// Wait for replication with digest verification to tier1.
+	require.Eventually(t, func() bool {
+		ok, _ := s.meta.IsTierVerified(ctx, relPath, "tier1")
+		return ok
+	}, 5*time.Second, 100*time.Millisecond, "file should be digest-verified on tier1")
+
+	// Metadata must reflect verified state.
+	f, err := s.meta.GetFile(ctx, relPath)
+	require.NoError(t, err)
+	assert.NotEmpty(t, f.Digest)
+}
+
+func TestIntegration_TransformTier_EvictionPreservesData(t *testing.T) {
+	s := newStackWithTransforms(t)
+	ctx := context.Background()
+
+	relPath := "recordings/cam1/evict-transform.mp4"
+	data := bytes.Repeat([]byte("evict me through transforms"), 512)
+
+	backend, tierName, err := s.svc.WriteTarget(relPath)
+	require.NoError(t, err)
+	require.NoError(t, backend.Put(ctx, relPath, bytes.NewReader(data), int64(len(data))))
+	require.NoError(t, s.svc.OnWriteComplete(ctx, relPath, tierName, int64(len(data)), time.Now()))
+
+	// Wait for replication.
+	require.Eventually(t, func() bool {
+		ok, _ := s.meta.IsTierVerified(ctx, relPath, "tier1")
+		return ok
+	}, 5*time.Second, 100*time.Millisecond)
+
+	// Wait for eviction (evict_after = 10ms for recordings).
+	require.Eventually(t, func() bool {
+		f, err := s.meta.GetFile(ctx, relPath)
+		return err == nil && f.CurrentTier == "tier1"
+	}, 5*time.Second, 100*time.Millisecond, "file should be evicted to tier1")
+
+	// File must no longer be on tier0.
+	_, _, err = s.tier0.Get(ctx, relPath)
+	assert.ErrorIs(t, err, domain.ErrNotExist)
+
+	// File must still be readable on tier1 (through the transform layer).
+	// Read via the raw backend to verify it is physically present.
+	rc, _, err := s.tier1Raw.Get(ctx, relPath)
+	require.NoError(t, err)
+	rc.Close()
+}
+
+func TestIntegration_TransformTier_RawStoredDiffers(t *testing.T) {
+	s := newStackWithTransforms(t)
+	ctx := context.Background()
+
+	relPath := "recordings/cam1/raw-check.mp4"
+	data := bytes.Repeat([]byte("compressible data for raw check"), 1000)
+
+	backend, tierName, err := s.svc.WriteTarget(relPath)
+	require.NoError(t, err)
+	require.NoError(t, backend.Put(ctx, relPath, bytes.NewReader(data), int64(len(data))))
+	require.NoError(t, s.svc.OnWriteComplete(ctx, relPath, tierName, int64(len(data)), time.Now()))
+
+	// Wait for replication to compressed tier1.
+	require.Eventually(t, func() bool {
+		ok, _ := s.meta.IsTierVerified(ctx, relPath, "tier1")
+		return ok
+	}, 5*time.Second, 100*time.Millisecond, "file should be verified on tier1")
+
+	// Read the raw bytes directly from the tier1 file backend (bypassing transform).
+	rc, _, err := s.tier1Raw.Get(ctx, relPath)
+	require.NoError(t, err)
+	rawBytes, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	rc.Close()
+
+	// The raw stored bytes must differ from the original — proving compression happened.
+	assert.NotEqual(t, data, rawBytes,
+		"raw stored bytes on tier1 should differ from original (compression applied)")
+	assert.Less(t, len(rawBytes), len(data),
+		"compressed bytes (%d) should be smaller than original (%d)",
+		len(rawBytes), len(data))
 }

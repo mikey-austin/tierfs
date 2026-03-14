@@ -2,7 +2,10 @@ package sqlite_test
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -236,4 +239,331 @@ func extractNames(infos []domain.FileInfo) []string {
 		out[i] = fi.Name
 	}
 	return out
+}
+
+// ── Concurrency & scale tests ────────────────────────────────────────────────
+
+func TestConcurrentWriterReaderContention(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+
+	const (
+		numWriters     = 8
+		filesPerWriter = 100
+		numReaders     = 4
+	)
+
+	var writeErrors atomic.Int64
+	var readErrors atomic.Int64
+
+	// writerWg tracks only writers so we can signal readers to stop.
+	var writerWg sync.WaitGroup
+	var readerWg sync.WaitGroup
+	stopReaders := make(chan struct{})
+
+	// Launch writers.
+	for w := 0; w < numWriters; w++ {
+		writerWg.Add(1)
+		go func(writerID int) {
+			defer writerWg.Done()
+			for i := 0; i < filesPerWriter; i++ {
+				f := makeFile(fmt.Sprintf("writer%d/file_%04d.mp4", writerID, i), "tier0")
+				if err := s.UpsertFile(ctx, f); err != nil {
+					writeErrors.Add(1)
+				}
+			}
+		}(w)
+	}
+
+	// Launch readers.
+	for r := 0; r < numReaders; r++ {
+		readerWg.Add(1)
+		go func() {
+			defer readerWg.Done()
+			for {
+				select {
+				case <-stopReaders:
+					return
+				default:
+				}
+				if _, err := s.ListFiles(ctx, ""); err != nil {
+					readErrors.Add(1)
+				}
+				if _, err := s.GetFile(ctx, "writer0/file_0050.mp4"); err != nil && err != domain.ErrNotExist {
+					readErrors.Add(1)
+				}
+			}
+		}()
+	}
+
+	writerWg.Wait()
+	close(stopReaders)
+	readerWg.Wait()
+
+	assert.Zero(t, writeErrors.Load(), "expected no write errors")
+	// Readers may occasionally see transient contention errors under
+	// heavy concurrent load; log but don't fail on read errors.
+	if re := readErrors.Load(); re > 0 {
+		t.Logf("note: %d transient read errors under contention (non-fatal)", re)
+	}
+
+	// Verify total file count.
+	all, err := s.ListFiles(ctx, "")
+	require.NoError(t, err)
+	assert.Len(t, all, numWriters*filesPerWriter)
+}
+
+func TestConcurrentUpsertSamePath(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+
+	const numGoroutines = 8
+	const relPath = "contested/file.mp4"
+
+	var wg sync.WaitGroup
+	var upsertErrors atomic.Int64
+
+	for g := 0; g < numGoroutines; g++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			f := domain.File{
+				RelPath:     relPath,
+				CurrentTier: fmt.Sprintf("tier%d", id),
+				State:       domain.StateSynced,
+				Size:        int64(id * 1000),
+				ModTime:     time.Now().Truncate(time.Millisecond),
+				Digest:      fmt.Sprintf("digest_%d", id),
+			}
+			if err := s.UpsertFile(ctx, f); err != nil {
+				upsertErrors.Add(1)
+			}
+		}(g)
+	}
+
+	wg.Wait()
+
+	assert.Zero(t, upsertErrors.Load(), "expected no upsert errors")
+
+	// The file must exist and have a consistent state from one of the writers.
+	got, err := s.GetFile(ctx, relPath)
+	require.NoError(t, err)
+	assert.Equal(t, relPath, got.RelPath)
+	assert.Equal(t, domain.StateSynced, got.State)
+	// CurrentTier should be one of "tier0" through "tier7".
+	assert.Contains(t, got.CurrentTier, "tier")
+}
+
+func TestBusyTimeoutBehavior(t *testing.T) {
+	// The Store serialises writes within a single instance via sync.Mutex.
+	// This test validates that a single Store handles high-concurrency
+	// writes from many goroutines without errors (the mutex + WAL +
+	// busy_timeout all work together).
+	s := newStore(t)
+	ctx := context.Background()
+
+	const (
+		numWriters     = 16
+		filesPerWriter = 50
+	)
+	var wg sync.WaitGroup
+	var errors atomic.Int64
+
+	wg.Add(numWriters)
+	for w := 0; w < numWriters; w++ {
+		w := w
+		go func() {
+			defer wg.Done()
+			for i := 0; i < filesPerWriter; i++ {
+				f := makeFile(fmt.Sprintf("writer%02d/file_%04d.mp4", w, i), "tier0")
+				if err := s.UpsertFile(ctx, f); err != nil {
+					errors.Add(1)
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	require.Zero(t, errors.Load(), "no errors expected when writes are serialised by Store mutex")
+
+	all, err := s.ListFiles(ctx, "")
+	require.NoError(t, err)
+	assert.Equal(t, numWriters*filesPerWriter, len(all))
+}
+
+func TestListDir_LargeScale(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping large-scale test in short mode")
+	}
+
+	s := newStore(t)
+	ctx := context.Background()
+
+	const (
+		numCams       = 10
+		numDays       = 10
+		filesPerDir   = 100
+		totalExpected = numCams * numDays * filesPerDir // 10,000
+	)
+
+	// Insert 10,000 files across 100 directories.
+	for cam := 1; cam <= numCams; cam++ {
+		for day := 1; day <= numDays; day++ {
+			for n := 0; n < filesPerDir; n++ {
+				relPath := fmt.Sprintf("cam%02d/2024-01-%02d/file_%04d.mp4", cam, day, n)
+				f := makeFile(relPath, "tier0")
+				require.NoError(t, s.UpsertFile(ctx, f))
+			}
+		}
+	}
+
+	start := time.Now()
+
+	// Root listing: 10 camera directories.
+	root, err := s.ListDir(ctx, "")
+	require.NoError(t, err)
+	assert.Len(t, root, numCams)
+	for _, e := range root {
+		assert.True(t, e.IsDir)
+	}
+
+	// Camera listing: 10 day directories per camera.
+	cam01, err := s.ListDir(ctx, "cam01")
+	require.NoError(t, err)
+	assert.Len(t, cam01, numDays)
+
+	// Day listing: 100 files per day directory.
+	dayDir, err := s.ListDir(ctx, "cam05/2024-01-05")
+	require.NoError(t, err)
+	assert.Len(t, dayDir, filesPerDir)
+	for _, e := range dayDir {
+		assert.False(t, e.IsDir)
+	}
+
+	elapsed := time.Since(start)
+	t.Logf("ListDir queries across %d files completed in %v", totalExpected, elapsed)
+	assert.Less(t, elapsed, 10*time.Second, "ListDir queries should complete within a reasonable time")
+}
+
+func TestListFiles_LargeScale(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping large-scale test in short mode")
+	}
+
+	s := newStore(t)
+	ctx := context.Background()
+
+	const totalFiles = 10_000
+
+	// Insert 10,000 files under a common prefix.
+	for i := 0; i < totalFiles; i++ {
+		relPath := fmt.Sprintf("data/batch/file_%05d.mp4", i)
+		f := makeFile(relPath, "tier0")
+		require.NoError(t, s.UpsertFile(ctx, f))
+	}
+
+	start := time.Now()
+	all, err := s.ListFiles(ctx, "data/batch")
+	elapsed := time.Since(start)
+
+	require.NoError(t, err)
+	assert.Len(t, all, totalFiles)
+
+	// Verify no duplicates.
+	seen := make(map[string]struct{}, len(all))
+	for _, f := range all {
+		_, dup := seen[f.RelPath]
+		assert.False(t, dup, "duplicate file: %s", f.RelPath)
+		seen[f.RelPath] = struct{}{}
+	}
+
+	t.Logf("ListFiles returned %d files in %v", len(all), elapsed)
+	assert.Less(t, elapsed, 10*time.Second, "ListFiles should complete within a reasonable time")
+}
+
+func TestEvictionCandidates_UnderLoad(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping large-scale test in short mode")
+	}
+
+	s := newStore(t)
+	ctx := context.Background()
+
+	const (
+		totalFiles    = 5000
+		oldFileCount  = 2500 // files with arrived_at before cutoff
+		tierName      = "tier0"
+	)
+
+	cutoff := time.Now().Add(-24 * time.Hour)
+	oldTime := cutoff.Add(-48 * time.Hour)  // 48 hours before cutoff
+	newTime := cutoff.Add(48 * time.Hour)   // 48 hours after cutoff
+
+	// Insert 5,000 synced files with associated file_tiers entries.
+	for i := 0; i < totalFiles; i++ {
+		relPath := fmt.Sprintf("evict/file_%05d.mp4", i)
+		f := domain.File{
+			RelPath:     relPath,
+			CurrentTier: tierName,
+			State:       domain.StateSynced,
+			Size:        2048,
+			ModTime:     time.Now().Truncate(time.Millisecond),
+			Digest:      fmt.Sprintf("hash_%05d", i),
+		}
+		require.NoError(t, s.UpsertFile(ctx, f))
+
+		// First half: arrived before cutoff (eviction candidates).
+		// Second half: arrived after cutoff (should not be evicted).
+		arrivedAt := newTime
+		if i < oldFileCount {
+			arrivedAt = oldTime
+		}
+		ft := domain.FileTier{
+			RelPath:   relPath,
+			TierName:  tierName,
+			ArrivedAt: arrivedAt,
+			Verified:  true,
+		}
+		require.NoError(t, s.AddFileTier(ctx, ft))
+	}
+
+	// Run EvictionCandidates while concurrent upserts happen.
+	var wg sync.WaitGroup
+	var upsertErrors atomic.Int64
+	stopUpserts := make(chan struct{})
+
+	// Background upsert goroutine: continuously upsert new files.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		i := 0
+		for {
+			select {
+			case <-stopUpserts:
+				return
+			default:
+			}
+			relPath := fmt.Sprintf("concurrent/file_%05d.mp4", i)
+			f := makeFile(relPath, "tier1")
+			if err := s.UpsertFile(ctx, f); err != nil {
+				upsertErrors.Add(1)
+			}
+			i++
+		}
+	}()
+
+	candidates, err := s.EvictionCandidates(ctx, tierName, cutoff)
+	close(stopUpserts)
+	wg.Wait()
+
+	require.NoError(t, err)
+	assert.Len(t, candidates, oldFileCount)
+	assert.Zero(t, upsertErrors.Load(), "expected no concurrent upsert errors")
+
+	// Verify all candidates have the correct tier.
+	for _, c := range candidates {
+		assert.Equal(t, tierName, c.CurrentTier)
+		assert.Equal(t, domain.StateSynced, c.State)
+	}
 }

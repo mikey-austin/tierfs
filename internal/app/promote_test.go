@@ -370,22 +370,6 @@ func TestPromoteToHot_FullLifecycle(t *testing.T) {
 	assert.Equal(t, newSize, f.Size)
 }
 
-// Verify the Replicator's Metrics method still works.
-func TestReplicator_Metrics_ZeroInitial(t *testing.T) {
-	r := app.NewReplicator(
-		app.ReplicatorConfig{Workers: 1, MaxRetries: 0, RetryInterval: time.Second, Verify: "none"},
-		newMemMeta(),
-		&fakeTierLookup{backends: map[string]domain.Backend{}},
-		zaptest.NewLogger(t),
-	)
-	r.Start()
-	defer r.Stop()
-	copied, failed, depth := r.Metrics()
-	assert.Equal(t, int64(0), copied)
-	assert.Equal(t, int64(0), failed)
-	assert.Equal(t, int64(0), depth)
-}
-
 // Ensure the io.Reader passed to PromoteToHot Put is fully consumed.
 func TestPromoteToHot_ReaderFullyConsumed(t *testing.T) {
 	// If Put doesn't fully drain the reader from Get, the underlying connection

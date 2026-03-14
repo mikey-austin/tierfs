@@ -58,6 +58,42 @@ const (
 	maxReconnectDelay = 5 * time.Second
 )
 
+// smbShare abstracts the *smb2.Share methods used by this backend.
+// In production the concrete type is *smb2.Share; in tests a mock can be
+// substituted via newForTest.
+type smbShare interface {
+	OpenFile(name string, flag int, perm os.FileMode) (smbFile, error)
+	Open(name string) (smbFile, error)
+	Stat(name string) (os.FileInfo, error)
+	Remove(name string) error
+	Rename(oldpath, newpath string) error
+	Mkdir(name string, perm os.FileMode) error
+	ReadDir(name string) ([]os.FileInfo, error)
+	Umount() error
+}
+
+// smbFile abstracts the *smb2.File methods used by this backend.
+type smbFile interface {
+	io.ReadWriteCloser
+	Stat() (os.FileInfo, error)
+}
+
+// shareAdapter wraps *smb2.Share to satisfy smbShare (adjusting return types).
+type shareAdapter struct {
+	s *smb2.Share
+}
+
+func (a *shareAdapter) OpenFile(name string, flag int, perm os.FileMode) (smbFile, error) {
+	return a.s.OpenFile(name, flag, perm)
+}
+func (a *shareAdapter) Open(name string) (smbFile, error) { return a.s.Open(name) }
+func (a *shareAdapter) Stat(name string) (os.FileInfo, error)     { return a.s.Stat(name) }
+func (a *shareAdapter) Remove(name string) error                  { return a.s.Remove(name) }
+func (a *shareAdapter) Rename(oldpath, newpath string) error      { return a.s.Rename(oldpath, newpath) }
+func (a *shareAdapter) Mkdir(name string, perm os.FileMode) error { return a.s.Mkdir(name, perm) }
+func (a *shareAdapter) ReadDir(name string) ([]os.FileInfo, error) { return a.s.ReadDir(name) }
+func (a *shareAdapter) Umount() error                              { return a.s.Umount() }
+
 // Config holds the configuration for an SMB backend.
 // Credentials are resolved in this order: env vars > config fields > URI userinfo.
 type Config struct {
@@ -100,9 +136,26 @@ type Backend struct {
 	log *zap.Logger
 
 	mu      sync.RWMutex
-	share   *smb2.Share   // nil when not connected
+	share   smbShare      // nil when not connected
 	session *smb2.Session // held so we can Close() on reconnect
 	conn    net.Conn
+
+	// connectFn is called by withReconnect to re-establish the connection.
+	// In production this is b.connect; tests override it via newForTest.
+	connectFn func() error
+}
+
+// newForTest creates a Backend wired to a mock smbShare, bypassing connect().
+// Only available within the smb package (tests use package smb, not smb_test).
+func newForTest(share smbShare, prefix string, log *zap.Logger) *Backend {
+	b := &Backend{
+		cfg: Config{Name: "test"},
+		p:   parsedURI{prefix: prefix},
+		log: log,
+		share: share,
+	}
+	b.connectFn = func() error { return nil }
+	return b
 }
 
 // New creates an SMB Backend from cfg and establishes the initial connection.
@@ -125,6 +178,7 @@ func New(cfg Config, log *zap.Logger) (*Backend, error) {
 			zap.String("share", p.shareName),
 		),
 	}
+	b.connectFn = b.connect
 
 	if err := b.connect(); err != nil {
 		return nil, fmt.Errorf("smb backend %q: initial connect: %w", cfg.Name, err)
@@ -168,7 +222,7 @@ func (b *Backend) Put(ctx context.Context, relPath string, r io.Reader, size int
 	sharePath := b.sharePath(relPath)
 	tmpPath := sharePath + ".tierfs-tmp-" + randHex(8)
 
-	return b.withReconnect(ctx, func(share *smb2.Share) error {
+	return b.withReconnect(ctx, func(share smbShare) error {
 		// Ensure parent directory exists.
 		dir := path.Dir(sharePath)
 		if err := mkdirAll(share, dir); err != nil {
@@ -209,7 +263,7 @@ func (b *Backend) Get(ctx context.Context, relPath string) (io.ReadCloser, int64
 
 	var rc io.ReadCloser
 	var size int64
-	err := b.withReconnect(ctx, func(share *smb2.Share) error {
+	err := b.withReconnect(ctx, func(share smbShare) error {
 		f, err := share.Open(sharePath)
 		if err != nil {
 			if isNotExist(err) {
@@ -236,7 +290,7 @@ func (b *Backend) Get(ctx context.Context, relPath string) (io.ReadCloser, int64
 func (b *Backend) Stat(ctx context.Context, relPath string) (*domain.FileInfo, error) {
 	sharePath := b.sharePath(relPath)
 	var fi *domain.FileInfo
-	err := b.withReconnect(ctx, func(share *smb2.Share) error {
+	err := b.withReconnect(ctx, func(share smbShare) error {
 		info, err := share.Stat(sharePath)
 		if err != nil {
 			if isNotExist(err) {
@@ -260,7 +314,7 @@ func (b *Backend) Stat(ctx context.Context, relPath string) (*domain.FileInfo, e
 // Returns nil if the file does not exist.
 func (b *Backend) Delete(ctx context.Context, relPath string) error {
 	sharePath := b.sharePath(relPath)
-	return b.withReconnect(ctx, func(share *smb2.Share) error {
+	return b.withReconnect(ctx, func(share smbShare) error {
 		err := share.Remove(sharePath)
 		if err != nil && !isNotExist(err) {
 			return fmt.Errorf("remove %q: %w", sharePath, err)
@@ -275,7 +329,7 @@ func (b *Backend) Delete(ctx context.Context, relPath string) error {
 func (b *Backend) List(ctx context.Context, prefix string) ([]domain.FileInfo, error) {
 	sharePath := b.sharePath(prefix)
 	var out []domain.FileInfo
-	err := b.withReconnect(ctx, func(share *smb2.Share) error {
+	err := b.withReconnect(ctx, func(share smbShare) error {
 		out = nil
 		return walkShare(share, sharePath, b.p.prefix, func(fi domain.FileInfo) {
 			if !fi.IsDir {
@@ -291,7 +345,7 @@ func (b *Backend) List(ctx context.Context, prefix string) ([]domain.FileInfo, e
 func (b *Backend) Rename(ctx context.Context, oldRel, newRel string) error {
 	oldPath := b.sharePath(oldRel)
 	newPath := b.sharePath(newRel)
-	return b.withReconnect(ctx, func(share *smb2.Share) error {
+	return b.withReconnect(ctx, func(share smbShare) error {
 		dir := path.Dir(newPath)
 		if err := mkdirAll(share, dir); err != nil {
 			return fmt.Errorf("mkdirAll %q: %w", dir, err)
@@ -348,7 +402,7 @@ func (b *Backend) connect() error {
 
 	b.conn = conn
 	b.session = session
-	b.share = share
+	b.share = &shareAdapter{s: share}
 	return nil
 }
 
@@ -380,7 +434,7 @@ func (b *Backend) disconnect() error {
 // withReconnect runs fn with the current share handle. If fn returns a
 // transport error, it reconnects once and retries fn. This handles temporary
 // NAS unavailability (reboots, failover) transparently.
-func (b *Backend) withReconnect(ctx context.Context, fn func(*smb2.Share) error) error {
+func (b *Backend) withReconnect(ctx context.Context, fn func(smbShare) error) error {
 	// Fast path: try with existing share under read lock.
 	b.mu.RLock()
 	share := b.share
@@ -416,7 +470,7 @@ func (b *Backend) withReconnect(ctx context.Context, fn func(*smb2.Share) error)
 	}
 
 	b.log.Info("reconnecting to SMB share")
-	if err := b.connect(); err != nil {
+	if err := b.connectFn(); err != nil {
 		return fmt.Errorf("smb reconnect failed: %w", err)
 	}
 	b.log.Info("SMB share reconnected")
@@ -436,7 +490,7 @@ func (b *Backend) sharePath(relPath string) string {
 
 // mkdirAll creates the full directory tree on the share, ignoring
 // "already exists" errors at each step.
-func mkdirAll(share *smb2.Share, dirPath string) error {
+func mkdirAll(share smbShare, dirPath string) error {
 	if dirPath == "" || dirPath == "." || dirPath == "/" {
 		return nil
 	}
@@ -462,7 +516,7 @@ func mkdirAll(share *smb2.Share, dirPath string) error {
 
 // pruneEmptyDirs walks up from dirPath toward stopAt, removing empty
 // directories. Stops when a non-empty directory or stopAt is reached.
-func pruneEmptyDirs(share *smb2.Share, dirPath, stopAt string) {
+func pruneEmptyDirs(share smbShare, dirPath, stopAt string) {
 	for {
 		if dirPath == "" || dirPath == "." || dirPath == stopAt || dirPath == "/" {
 			return
@@ -480,7 +534,7 @@ func pruneEmptyDirs(share *smb2.Share, dirPath, stopAt string) {
 
 // walkShare recursively visits all entries under root, calling fn for each.
 // The relPath in FileInfo is relative to the share prefix, not the share root.
-func walkShare(share *smb2.Share, root, prefix string, fn func(domain.FileInfo)) error {
+func walkShare(share smbShare, root, prefix string, fn func(domain.FileInfo)) error {
 	entries, err := share.ReadDir(root)
 	if err != nil {
 		if isNotExist(err) {

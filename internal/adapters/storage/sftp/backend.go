@@ -102,6 +102,20 @@ type Config struct {
 	KnownHostsFile string
 }
 
+// sftpClient abstracts the subset of *sftp.Client that Backend uses.
+// This enables unit testing without a real SSH connection.
+type sftpClient interface {
+	Open(path string) (*sftp.File, error)
+	OpenFile(path string, f int) (*sftp.File, error)
+	Stat(path string) (os.FileInfo, error)
+	Mkdir(path string) error
+	Rename(oldname, newname string) error
+	Remove(path string) error
+	RemoveDirectory(path string) error
+	ReadDir(path string) ([]os.FileInfo, error)
+	Close() error
+}
+
 // Backend is a domain.Backend backed by an SFTP server.
 // All exported methods are safe for concurrent use.
 type Backend struct {
@@ -110,8 +124,11 @@ type Backend struct {
 	log *zap.Logger
 
 	mu     sync.RWMutex
-	client *sftp.Client // nil when not connected
+	client sftpClient // nil when not connected
 	conn   *ssh.Client
+
+	// connectFn creates a new sftpClient + ssh.Client. Replaced in tests.
+	connectFn func() (sftpClient, *ssh.Client, error)
 }
 
 // New creates an SFTP Backend from cfg and establishes the initial connection.
@@ -140,6 +157,7 @@ func New(cfg Config, log *zap.Logger) (*Backend, error) {
 			zap.String("base", p.basePath),
 		),
 	}
+	b.connectFn = b.dialConnect
 
 	if err := b.connect(); err != nil {
 		return nil, fmt.Errorf("sftp backend %q: initial connect: %w", cfg.Name, err)
@@ -181,7 +199,7 @@ func (b *Backend) Put(ctx context.Context, relPath string, r io.Reader, _ int64)
 	dst := b.remotePath(relPath)
 	tmp := dst + ".tierfs-tmp-" + randHex(8)
 
-	return b.withReconnect(ctx, func(c *sftp.Client) error {
+	return b.withReconnect(ctx, func(c sftpClient) error {
 		// Ensure parent directory exists.
 		if err := mkdirAll(c, path.Dir(dst)); err != nil {
 			return fmt.Errorf("mkdirAll %q: %w", path.Dir(dst), err)
@@ -224,7 +242,7 @@ func (b *Backend) Get(ctx context.Context, relPath string) (io.ReadCloser, int64
 	var rc io.ReadCloser
 	var size int64
 
-	err := b.withReconnect(ctx, func(c *sftp.Client) error {
+	err := b.withReconnect(ctx, func(c sftpClient) error {
 		f, err := c.Open(remote)
 		if err != nil {
 			return sftpErr(err, remote)
@@ -246,7 +264,7 @@ func (b *Backend) Stat(ctx context.Context, relPath string) (*domain.FileInfo, e
 	remote := b.remotePath(relPath)
 	var fi *domain.FileInfo
 
-	err := b.withReconnect(ctx, func(c *sftp.Client) error {
+	err := b.withReconnect(ctx, func(c sftpClient) error {
 		info, err := c.Stat(remote)
 		if err != nil {
 			return sftpErr(err, remote)
@@ -266,7 +284,7 @@ func (b *Backend) Stat(ctx context.Context, relPath string) (*domain.FileInfo, e
 // Delete removes the file at relPath. Returns nil if not found.
 func (b *Backend) Delete(ctx context.Context, relPath string) error {
 	remote := b.remotePath(relPath)
-	return b.withReconnect(ctx, func(c *sftp.Client) error {
+	return b.withReconnect(ctx, func(c sftpClient) error {
 		err := c.Remove(remote)
 		if err != nil && !isNotExist(err) {
 			return fmt.Errorf("remove %q: %w", remote, err)
@@ -281,7 +299,7 @@ func (b *Backend) List(ctx context.Context, prefix string) ([]domain.FileInfo, e
 	remote := b.remotePath(prefix)
 	var out []domain.FileInfo
 
-	err := b.withReconnect(ctx, func(c *sftp.Client) error {
+	err := b.withReconnect(ctx, func(c sftpClient) error {
 		out = nil
 		return walkSFTP(c, remote, b.remotePath(""), func(fi domain.FileInfo) {
 			if !fi.IsDir {
@@ -298,7 +316,7 @@ func (b *Backend) Rename(ctx context.Context, oldRel, newRel string) error {
 	oldRemote := b.remotePath(oldRel)
 	newRemote := b.remotePath(newRel)
 
-	return b.withReconnect(ctx, func(c *sftp.Client) error {
+	return b.withReconnect(ctx, func(c sftpClient) error {
 		if err := mkdirAll(c, path.Dir(newRemote)); err != nil {
 			return fmt.Errorf("mkdirAll %q: %w", path.Dir(newRemote), err)
 		}
@@ -324,17 +342,28 @@ func (b *Backend) Close() error {
 // ── Connection management ─────────────────────────────────────────────────────
 
 func (b *Backend) connect() error {
+	client, conn, err := b.connectFn()
+	if err != nil {
+		return err
+	}
+	b.conn = conn
+	b.client = client
+	return nil
+}
+
+// dialConnect performs the real SSH + SFTP dial.
+func (b *Backend) dialConnect() (sftpClient, *ssh.Client, error) {
 	hostKey, err := b.hostKeyCallback()
 	if err != nil {
-		return fmt.Errorf("host key: %w", err)
+		return nil, nil, fmt.Errorf("host key: %w", err)
 	}
 
 	authMethods, err := b.authMethods()
 	if err != nil {
-		return fmt.Errorf("auth methods: %w", err)
+		return nil, nil, fmt.Errorf("auth methods: %w", err)
 	}
 	if len(authMethods) == 0 {
-		return fmt.Errorf("no authentication methods available (set password, key_path, or load key into SSH agent)")
+		return nil, nil, fmt.Errorf("no authentication methods available (set password, key_path, or load key into SSH agent)")
 	}
 
 	sshCfg := &ssh.ClientConfig{
@@ -346,18 +375,16 @@ func (b *Backend) connect() error {
 
 	sshConn, err := ssh.Dial("tcp", b.p.hostPort, sshCfg)
 	if err != nil {
-		return fmt.Errorf("ssh dial %q: %w", b.p.hostPort, err)
+		return nil, nil, fmt.Errorf("ssh dial %q: %w", b.p.hostPort, err)
 	}
 
 	client, err := sftp.NewClient(sshConn)
 	if err != nil {
 		sshConn.Close()
-		return fmt.Errorf("sftp client: %w", err)
+		return nil, nil, fmt.Errorf("sftp client: %w", err)
 	}
 
-	b.conn = sshConn
-	b.client = client
-	return nil
+	return client, sshConn, nil
 }
 
 func (b *Backend) disconnect() error {
@@ -377,7 +404,7 @@ func (b *Backend) disconnect() error {
 	return first
 }
 
-func (b *Backend) withReconnect(ctx context.Context, fn func(*sftp.Client) error) error {
+func (b *Backend) withReconnect(ctx context.Context, fn func(sftpClient) error) error {
 	b.mu.RLock()
 	client := b.client
 	b.mu.RUnlock()
@@ -514,7 +541,7 @@ func (b *Backend) remotePath(relPath string) string {
 	return path.Join(parts...)
 }
 
-func mkdirAll(c *sftp.Client, dirPath string) error {
+func mkdirAll(c sftpClient, dirPath string) error {
 	if dirPath == "" || dirPath == "." || dirPath == "/" {
 		return nil
 	}
@@ -545,7 +572,7 @@ func mkdirAll(c *sftp.Client, dirPath string) error {
 	return nil
 }
 
-func pruneEmptyDirs(c *sftp.Client, dirPath, stopAt string) {
+func pruneEmptyDirs(c sftpClient, dirPath, stopAt string) {
 	for {
 		if dirPath == "" || dirPath == "." || dirPath == "/" || dirPath == stopAt {
 			return
@@ -561,7 +588,7 @@ func pruneEmptyDirs(c *sftp.Client, dirPath, stopAt string) {
 	}
 }
 
-func walkSFTP(c *sftp.Client, root, basePrefix string, fn func(domain.FileInfo)) error {
+func walkSFTP(c sftpClient, root, basePrefix string, fn func(domain.FileInfo)) error {
 	entries, err := c.ReadDir(root)
 	if err != nil {
 		if isNotExist(err) {
@@ -655,6 +682,23 @@ func randHex(n int) string {
 	b := make([]byte, n)
 	rand.Read(b) //nolint:errcheck
 	return hex.EncodeToString(b)[:n]
+}
+
+// newForTest creates a Backend wired to the given mock client.
+// It bypasses connect entirely and is only intended for unit tests.
+func newForTest(client sftpClient, p parsedURI, log *zap.Logger) *Backend {
+	b := &Backend{
+		cfg:    Config{Name: "test"},
+		p:      p,
+		log:    log,
+		client: client,
+	}
+	// connectFn replaces the existing client (simulates reconnect).
+	b.connectFn = func() (sftpClient, *ssh.Client, error) {
+		b.client = client
+		return client, nil, nil
+	}
+	return b
 }
 
 // ── URI parsing ───────────────────────────────────────────────────────────────

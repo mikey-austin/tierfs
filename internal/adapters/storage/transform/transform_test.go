@@ -36,6 +36,12 @@ func newHexKey(t *testing.T) string {
 	return k
 }
 
+func randomBytes(n int) []byte {
+	b := make([]byte, n)
+	rand.Read(b) //nolint:errcheck
+	return b
+}
+
 // roundtrip applies a single transform forward then in reverse and asserts the
 // output matches the input.
 func roundtrip(t *testing.T, tr transform.Transform, input []byte) []byte {
@@ -59,6 +65,41 @@ func roundtrip(t *testing.T, tr transform.Transform, input []byte) []byte {
 	require.NoError(t, r.Close(), "close reader")
 
 	return output
+}
+
+// testRoundtripSuite runs a standard suite of roundtrip tests against a
+// single Transform: empty, single byte, repetitive plaintext, and large random.
+func testRoundtripSuite(t *testing.T, name string, tr transform.Transform) {
+	t.Helper()
+	cases := []struct {
+		name  string
+		input []byte
+	}{
+		{"empty", []byte{}},
+		{"single_byte", []byte{0x42}},
+		{"plaintext", bytes.Repeat([]byte("hello tierfs "+name), 10_000)},
+		{"large_random_8MiB", randomBytes(8 * 1024 * 1024)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			output := roundtrip(t, tr, tc.input)
+			assert.Equal(t, tc.input, output)
+		})
+	}
+}
+
+// testCompressionRatio verifies that a compression transform achieves at least
+// 5x compression on highly repetitive data.
+func testCompressionRatio(t *testing.T, tr transform.Transform) {
+	t.Helper()
+	input := bytes.Repeat([]byte("aaaaaaa"), 100_000) // highly compressible
+
+	var buf bytes.Buffer
+	w, _ := tr.Writer(&buf)
+	io.Copy(w, bytes.NewReader(input)) //nolint:errcheck
+	w.Close()
+
+	assert.Less(t, buf.Len(), len(input)/5, "expected >5x compression of repetitive data")
 }
 
 // memBackend is a minimal in-memory domain.Backend for testing TransformBackend.
@@ -114,41 +155,16 @@ func (m *memBackend) List(_ context.Context, _ string) ([]domain.FileInfo, error
 
 // ── GzipTransform Tests ───────────────────────────────────────────────────────
 
-func TestGzip_Roundtrip_Plaintext(t *testing.T) {
+func TestGzip_RoundtripSuite(t *testing.T) {
 	tr, err := transform.NewGzip(gzip.DefaultCompression)
 	require.NoError(t, err)
-
-	input := bytes.Repeat([]byte("hello tierfs compression"), 10_000)
-	output := roundtrip(t, tr, input)
-	assert.Equal(t, input, output)
-}
-
-func TestGzip_Roundtrip_Empty(t *testing.T) {
-	tr, err := transform.NewGzip(gzip.BestSpeed)
-	require.NoError(t, err)
-	output := roundtrip(t, tr, []byte{})
-	assert.Empty(t, output)
-}
-
-func TestGzip_Roundtrip_SingleByte(t *testing.T) {
-	tr, err := transform.NewGzip(gzip.DefaultCompression)
-	require.NoError(t, err)
-	output := roundtrip(t, tr, []byte{0x42})
-	assert.Equal(t, []byte{0x42}, output)
+	testRoundtripSuite(t, "gzip", tr)
 }
 
 func TestGzip_CompressesRepetitiveData(t *testing.T) {
 	tr, err := transform.NewGzip(gzip.BestCompression)
 	require.NoError(t, err)
-
-	input := bytes.Repeat([]byte("aaaaaaa"), 100_000) // highly compressible
-
-	var buf bytes.Buffer
-	w, _ := tr.Writer(&buf)
-	io.Copy(w, bytes.NewReader(input)) //nolint:errcheck
-	w.Close()
-
-	assert.Less(t, buf.Len(), len(input)/5, "expected >5x compression of repetitive data")
+	testCompressionRatio(t, tr)
 }
 
 func TestGzip_InvalidLevel(t *testing.T) {
@@ -156,30 +172,11 @@ func TestGzip_InvalidLevel(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestGzip_LargeFile(t *testing.T) {
-	tr, err := transform.NewGzip(gzip.BestSpeed)
-	require.NoError(t, err)
-
-	// 8 MiB — spans multiple internal gzip write buffers
-	input := make([]byte, 8*1024*1024)
-	rand.Read(input) //nolint:errcheck
-	output := roundtrip(t, tr, input)
-	assert.Equal(t, input, output)
-}
-
 // ── AES256GCMTransform Tests ──────────────────────────────────────────────────
 
-func TestAES256GCM_Roundtrip(t *testing.T) {
+func TestAES256GCM_RoundtripSuite(t *testing.T) {
 	tr := transform.NewAES256GCM(newKey(t))
-	input := []byte("hello encrypted world")
-	output := roundtrip(t, tr, input)
-	assert.Equal(t, input, output)
-}
-
-func TestAES256GCM_Roundtrip_Empty(t *testing.T) {
-	tr := transform.NewAES256GCM(newKey(t))
-	output := roundtrip(t, tr, []byte{})
-	assert.Empty(t, output)
+	testRoundtripSuite(t, "aes-256-gcm", tr)
 }
 
 func TestAES256GCM_Roundtrip_ExactChunkBoundary(t *testing.T) {
@@ -196,14 +193,6 @@ func TestAES256GCM_Roundtrip_MultiChunk(t *testing.T) {
 	// 200 KiB → 3 full chunks + 1 partial (64+64+64+8 KiB)
 	input := make([]byte, 200*1024)
 	rand.Read(input) //nolint:errcheck
-	output := roundtrip(t, tr, input)
-	assert.Equal(t, input, output)
-}
-
-func TestAES256GCM_Roundtrip_LargeFile(t *testing.T) {
-	tr := transform.NewAES256GCM(newKey(t))
-	input := make([]byte, 4*1024*1024) // 4 MiB
-	rand.Read(input)                   //nolint:errcheck
 	output := roundtrip(t, tr, input)
 	assert.Equal(t, input, output)
 }
@@ -654,51 +643,16 @@ func TestTransformBackend_NewPipeline_Integration(t *testing.T) {
 
 // ── ZstdTransform Tests ───────────────────────────────────────────────────────
 
-func TestZstd_Roundtrip_Plaintext(t *testing.T) {
+func TestZstd_RoundtripSuite(t *testing.T) {
 	tr, err := transform.NewZstd(zstd.SpeedDefault)
 	require.NoError(t, err)
-
-	input := bytes.Repeat([]byte("hello tierfs zstd compression"), 10_000)
-	output := roundtrip(t, tr, input)
-	assert.Equal(t, input, output)
-}
-
-func TestZstd_Roundtrip_Empty(t *testing.T) {
-	tr, err := transform.NewZstd(zstd.SpeedFastest)
-	require.NoError(t, err)
-	output := roundtrip(t, tr, []byte{})
-	assert.Empty(t, output)
-}
-
-func TestZstd_Roundtrip_SingleByte(t *testing.T) {
-	tr, err := transform.NewZstd(zstd.SpeedDefault)
-	require.NoError(t, err)
-	output := roundtrip(t, tr, []byte{0x42})
-	assert.Equal(t, []byte{0x42}, output)
+	testRoundtripSuite(t, "zstd", tr)
 }
 
 func TestZstd_CompressesRepetitiveData(t *testing.T) {
 	tr, err := transform.NewZstd(zstd.SpeedBestCompression)
 	require.NoError(t, err)
-
-	input := bytes.Repeat([]byte("aaaaaaa"), 100_000)
-
-	var buf bytes.Buffer
-	w, _ := tr.Writer(&buf)
-	io.Copy(w, bytes.NewReader(input)) //nolint:errcheck
-	w.Close()
-
-	assert.Less(t, buf.Len(), len(input)/5, "expected >5x compression of repetitive data")
-}
-
-func TestZstd_LargeFile(t *testing.T) {
-	tr, err := transform.NewZstd(zstd.SpeedFastest)
-	require.NoError(t, err)
-
-	input := make([]byte, 8*1024*1024) // 8 MiB
-	rand.Read(input)                   //nolint:errcheck
-	output := roundtrip(t, tr, input)
-	assert.Equal(t, input, output)
+	testCompressionRatio(t, tr)
 }
 
 func TestZstd_FasterThanGzip_OnRepetitiveData(t *testing.T) {
@@ -715,25 +669,9 @@ func TestZstd_FasterThanGzip_OnRepetitiveData(t *testing.T) {
 
 // ── ChecksumTransform Tests ───────────────────────────────────────────────────
 
-func TestChecksum_Roundtrip(t *testing.T) {
+func TestChecksum_RoundtripSuite(t *testing.T) {
 	tr := transform.NewChecksum()
-	input := []byte("data to protect against bit-rot")
-	output := roundtrip(t, tr, input)
-	assert.Equal(t, input, output)
-}
-
-func TestChecksum_Roundtrip_Empty(t *testing.T) {
-	tr := transform.NewChecksum()
-	output := roundtrip(t, tr, []byte{})
-	assert.Empty(t, output)
-}
-
-func TestChecksum_Roundtrip_LargeFile(t *testing.T) {
-	tr := transform.NewChecksum()
-	input := make([]byte, 4*1024*1024)
-	rand.Read(input) //nolint:errcheck
-	output := roundtrip(t, tr, input)
-	assert.Equal(t, input, output)
+	testRoundtripSuite(t, "checksum", tr)
 }
 
 func TestChecksum_StoredDataHas16ByteHeader(t *testing.T) {
