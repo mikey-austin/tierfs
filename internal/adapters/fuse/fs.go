@@ -106,6 +106,24 @@ func (fs *TierFS) GetAttr(name string, ctx *gofuse.Context) (*gofuse.Attr, gofus
 		}, gofuse.OK
 	}
 
+	// Hot-tier fallback: the file may exist on disk but metadata hasn't
+	// caught up yet (e.g. FUSE Release/OnWriteComplete is still running
+	// asynchronously when ffmpeg re-opens for -movflags +faststart).
+	if hotBackend, berr := fs.svc.BackendFor(fs.svc.HottestTierName()); berr == nil {
+		if localPath, ok := hotBackend.LocalPath(name); ok {
+			if st, serr := os.Stat(localPath); serr == nil && !st.IsDir() {
+				return &gofuse.Attr{
+					Mode:  gofuse.S_IFREG | 0o644,
+					Size:  uint64(st.Size()),
+					Mtime: uint64(st.ModTime().Unix()),
+					Ino:   fs.inode(name),
+					Nlink: 1,
+					Owner: gofuse.Owner{Uid: fs.uid, Gid: fs.gid},
+				}, gofuse.OK
+			}
+		}
+	}
+
 	// Check if it's a virtual directory (has files below it).
 	entries, derr := fs.meta.ListDir(goCtx, name)
 	if derr == nil && len(entries) > 0 {
@@ -261,11 +279,27 @@ func (fs *TierFS) Open(name string, flags uint32, ctx *gofuse.Context) (nodefs.F
 	goCtx := context.Background()
 	backend, localPath, fileInfo, err := fs.svc.ReadTarget(goCtx, name)
 	if err != nil {
-		if err == domain.ErrNotExist {
-			return nil, gofuse.ENOENT
+		if errors.Is(err, domain.ErrNotExist) {
+			// Hot-tier fallback: file may exist on disk while async
+			// Release/OnWriteComplete is still updating metadata
+			// (e.g. ffmpeg -movflags +faststart re-open after close).
+			if hotBackend, berr := fs.svc.BackendFor(fs.svc.HottestTierName()); berr == nil {
+				if hp, ok := hotBackend.LocalPath(name); ok {
+					if _, serr := os.Stat(hp); serr == nil {
+						backend = hotBackend
+						localPath = hp
+						fileInfo = domain.File{RelPath: name, CurrentTier: fs.svc.HottestTierName()}
+						err = nil
+					}
+				}
+			}
+			if err != nil {
+				return nil, gofuse.ENOENT
+			}
+		} else {
+			fs.log.Error("read target", zap.String("name", name), zap.Error(err))
+			return nil, gofuse.EIO
 		}
-		fs.log.Error("read target", zap.String("name", name), zap.Error(err))
-		return nil, gofuse.EIO
 	}
 
 	// ── Write-open path ───────────────────────────────────────────────────────
@@ -357,7 +391,7 @@ func (fs *TierFS) Open(name string, flags uint32, ctx *gofuse.Context) (nodefs.F
 // Unlink deletes a file.
 func (fs *TierFS) Unlink(name string, ctx *gofuse.Context) gofuse.Status {
 	if err := fs.svc.OnDelete(context.Background(), name); err != nil {
-		if err == domain.ErrNotExist {
+		if errors.Is(err, domain.ErrNotExist) {
 			return gofuse.ENOENT
 		}
 		fs.log.Error("unlink", zap.String("name", name), zap.Error(err))
@@ -371,7 +405,7 @@ func (fs *TierFS) Unlink(name string, ctx *gofuse.Context) gofuse.Status {
 // Rename moves a file to a new path.
 func (fs *TierFS) Rename(oldName, newName string, ctx *gofuse.Context) gofuse.Status {
 	if err := fs.svc.OnRename(context.Background(), oldName, newName); err != nil {
-		if err == domain.ErrNotExist {
+		if errors.Is(err, domain.ErrNotExist) {
 			return gofuse.ENOENT
 		}
 		fs.log.Error("rename", zap.String("old", oldName), zap.String("new", newName), zap.Error(err))
