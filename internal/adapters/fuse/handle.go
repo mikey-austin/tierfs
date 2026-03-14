@@ -25,12 +25,12 @@ import (
 type writeHandle struct {
 	nodefs.File
 
-	mu        sync.Mutex
-	f         *os.File
-	relPath   string
-	tierName  string
-	svc       *app.TierService
-	log       *zap.Logger
+	mu       sync.Mutex
+	f        *os.File
+	relPath  string
+	tierName string
+	svc      *app.TierService
+	log      *zap.Logger
 
 	// stageFile is non-empty when writing to a remote backend.
 	stageFile string

@@ -36,13 +36,13 @@ import (
 // All path arguments are relative to the mount root.
 type TierFS struct {
 	pathfs.FileSystem // embed DefaultFileSystem for no-op defaults
-	svc      *app.TierService
-	meta     domain.MetadataStore
-	stager   *app.Stager
-	log      *zap.Logger
+	svc               *app.TierService
+	meta              domain.MetadataStore
+	stager            *app.Stager
+	log               *zap.Logger
 
 	// inodeMap assigns stable inode numbers to relative paths.
-	inodeMu sync.RWMutex
+	inodeMu  sync.RWMutex
 	inodeMap map[string]uint64
 	nextIno  atomic.Uint64
 }
@@ -80,11 +80,11 @@ func (fs *TierFS) GetAttr(name string, ctx *gofuse.Context) (*gofuse.Attr, gofus
 	if err == nil {
 		// It's a known file.
 		return &gofuse.Attr{
-			Mode:    gofuse.S_IFREG | 0o644,
-			Size:    uint64(f.Size),
-			Mtime:   uint64(f.ModTime.Unix()),
-			Ino:     fs.inode(name),
-			Nlink:   1,
+			Mode:  gofuse.S_IFREG | 0o644,
+			Size:  uint64(f.Size),
+			Mtime: uint64(f.ModTime.Unix()),
+			Ino:   fs.inode(name),
+			Nlink: 1,
 		}, gofuse.OK
 	}
 
@@ -281,10 +281,17 @@ func (fs *TierFS) Open(name string, flags uint32, ctx *gofuse.Context) (nodefs.F
 	}
 
 	// Slow path: remote backend — stage locally then serve.
-	_ = fileInfo
 	stagePath := fs.stager.StagePath(name)
+	needStage := false
 	if _, serr := os.Stat(stagePath); os.IsNotExist(serr) {
-		if serr := fs.stage(goCtx, backend, name, stagePath); serr != nil {
+		needStage = true
+	} else if fs.stager.IsStale(stagePath, fileInfo.Digest, fileInfo.ModTime, fileInfo.Size) {
+		fs.log.Debug("stale staged file, re-staging", zap.String("name", name))
+		fs.stager.CleanStale(stagePath)
+		needStage = true
+	}
+	if needStage {
+		if serr := fs.stage(goCtx, backend, name, stagePath, fileInfo); serr != nil {
 			fs.log.Error("stage remote file", zap.String("name", name), zap.Error(serr))
 			return nil, gofuse.EIO
 		}
@@ -305,8 +312,8 @@ func (fs *TierFS) Unlink(name string, ctx *gofuse.Context) gofuse.Status {
 		fs.log.Error("unlink", zap.String("name", name), zap.Error(err))
 		return gofuse.EIO
 	}
-	// Remove any staged copy.
-	os.Remove(fs.stager.StagePath(name)) //nolint:errcheck
+	// Remove any staged copy and its sidecar.
+	fs.stager.CleanStale(fs.stager.StagePath(name))
 	return gofuse.OK
 }
 
@@ -336,10 +343,7 @@ func (fs *TierFS) Utimens(name string, atime *time.Time, mtime *time.Time, ctx *
 	// Propagate to local backend if possible.
 	backend, _, _, berr := fs.svc.ReadTarget(goCtx, name)
 	if berr == nil {
-		type utimer interface {
-			Utimes(relPath string, atime, mtime time.Time) error
-		}
-		if u, ok := backend.(utimer); ok && mtime != nil {
+		if u, ok := backend.(domain.Utimer); ok && mtime != nil {
 			at := time.Now()
 			if atime != nil {
 				at = *atime
@@ -350,24 +354,37 @@ func (fs *TierFS) Utimens(name string, atime *time.Time, mtime *time.Time, ctx *
 	return gofuse.OK
 }
 
-// Truncate sets a file's size.
+// Truncate sets a file's size. Routes through the post-write path to
+// recompute the digest, reset state to local, and enqueue replication.
 func (fs *TierFS) Truncate(name string, size uint64, ctx *gofuse.Context) gofuse.Status {
 	goCtx := context.Background()
-	_, localPath, _, err := fs.svc.ReadTarget(goCtx, name)
+
+	// Promote to hot tier if needed (same as write-open path).
+	_, localPath, err := fs.svc.PromoteToHot(goCtx, name)
 	if err != nil {
-		return gofuse.ENOENT
-	}
-	if localPath == "" {
-		return gofuse.EACCES // can't truncate remote files in place
-	}
-	if err := os.Truncate(localPath, int64(size)); err != nil {
+		if errors.Is(err, domain.ErrNotExist) {
+			return gofuse.ENOENT
+		}
+		fs.log.Error("promote for truncate failed",
+			zap.String("name", name), zap.Error(err))
 		return gofuse.EIO
 	}
-	f, _ := fs.meta.GetFile(goCtx, name)
-	if f != nil {
-		f.Size = int64(size)
-		_ = fs.meta.UpsertFile(goCtx, *f)
+	if localPath == "" {
+		return gofuse.EACCES
 	}
+
+	if terr := os.Truncate(localPath, int64(size)); terr != nil {
+		fs.log.Error("truncate local file", zap.String("path", localPath), zap.Error(terr))
+		return gofuse.EIO
+	}
+
+	tierName := fs.svc.HottestTierName()
+	if werr := fs.svc.OnWriteComplete(goCtx, name, tierName, int64(size), time.Now()); werr != nil {
+		fs.log.Error("on write complete after truncate",
+			zap.String("name", name), zap.Error(werr))
+		return gofuse.EIO
+	}
+
 	return gofuse.OK
 }
 
@@ -391,7 +408,7 @@ func (fs *TierFS) inode(relPath string) uint64 {
 	return ino
 }
 
-func (fs *TierFS) stage(ctx context.Context, backend domain.Backend, relPath, stagePath string) error {
+func (fs *TierFS) stage(ctx context.Context, backend domain.Backend, relPath, stagePath string, fileInfo domain.File) error {
 	rc, _, err := backend.Get(ctx, relPath)
 	if err != nil {
 		return err
@@ -417,7 +434,17 @@ func (fs *TierFS) stage(ctx context.Context, backend domain.Backend, relPath, st
 	}
 	tmp.Sync() //nolint:errcheck
 	tmp.Close()
-	return os.Rename(tmpName, stagePath)
+	if err := os.Rename(tmpName, stagePath); err != nil {
+		return err
+	}
+	if werr := fs.stager.WriteMeta(stagePath, app.StageMeta{
+		Digest:  fileInfo.Digest,
+		ModTime: fileInfo.ModTime,
+		Size:    fileInfo.Size,
+	}); werr != nil {
+		fs.log.Warn("write stage meta", zap.String("path", relPath), zap.Error(werr))
+	}
+	return nil
 }
 
 func copyBuf(dst *os.File, src interface{ Read([]byte) (int, error) }, buf []byte) (int64, error) {
@@ -438,4 +465,3 @@ func copyBuf(dst *os.File, src interface{ Read([]byte) (int, error) }, buf []byt
 		}
 	}
 }
-

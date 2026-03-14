@@ -30,4 +30,5 @@ CREATE TABLE IF NOT EXISTS file_tiers (
 CREATE INDEX IF NOT EXISTS idx_files_state        ON files(state);
 CREATE INDEX IF NOT EXISTS idx_files_current_tier ON files(current_tier);
 CREATE INDEX IF NOT EXISTS idx_file_tiers_tier    ON file_tiers(tier_name);
+CREATE INDEX IF NOT EXISTS idx_file_tiers_arrived ON file_tiers(tier_name, arrived_at);
 `

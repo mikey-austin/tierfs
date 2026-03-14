@@ -4,7 +4,6 @@
 package app
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -31,7 +30,7 @@ type ReplicatorConfig struct {
 	Workers       int
 	MaxRetries    int
 	RetryInterval time.Duration
-	Verify        string     // "none" | "size" | "digest"
+	Verify        string      // "none" | "size" | "digest"
 	WriteGuard    *WriteGuard // nil = no guard (for tests that don't need it)
 }
 
@@ -43,18 +42,18 @@ type TierLookup interface {
 // Replicator manages an async worker pool that copies files between tiers,
 // then verifies the copy and updates the metadata store.
 type Replicator struct {
-	cfg     ReplicatorConfig
-	meta    domain.MetadataStore
-	tiers   TierLookup
-	log     *zap.Logger
-	queue   chan CopyJob
-	wg      sync.WaitGroup
-	stop    chan struct{}
+	cfg   ReplicatorConfig
+	meta  domain.MetadataStore
+	tiers TierLookup
+	log   *zap.Logger
+	queue chan CopyJob
+	wg    sync.WaitGroup
+	stop  chan struct{}
 
 	// Metrics (read with atomic, written under the worker goroutines).
-	totalCopied  atomic.Int64
-	totalFailed  atomic.Int64
-	queueDepth   atomic.Int64
+	totalCopied atomic.Int64
+	totalFailed atomic.Int64
+	queueDepth  atomic.Int64
 }
 
 // NewReplicator creates a Replicator. Call Start() to begin processing.
@@ -192,11 +191,12 @@ func (r *Replicator) process(log *zap.Logger, job CopyJob) error {
 	// an application truncated and rewrote the file, or the FUSE open+write
 	// path was used without going through Create). Abort, let OnWriteComplete
 	// re-compute the digest and re-enqueue once the new write completes.
+	const mtimePrecision = time.Microsecond
 	if file.Digest != "" {
 		liveInfo, serr := src.Stat(ctx, job.RelPath)
 		if serr == nil {
 			stale := liveInfo.Size != file.Size ||
-				!liveInfo.ModTime.Equal(file.ModTime)
+				liveInfo.ModTime.Truncate(mtimePrecision) != file.ModTime.Truncate(mtimePrecision)
 			if stale {
 				log.Warn("aborting replication: source file changed since enqueue",
 					zap.String("rel_path", job.RelPath),
@@ -239,11 +239,11 @@ func (r *Replicator) process(log *zap.Logger, job CopyJob) error {
 
 	var (
 		streamBody io.Reader = rc
-		hashBuf   *bytes.Buffer
+		hasher     *digest.Hasher
 	)
 	if r.cfg.Verify == "digest" && file.Digest != "" {
-		hashBuf = &bytes.Buffer{}
-		streamBody = io.TeeReader(rc, hashBuf)
+		hasher = digest.NewHasher()
+		streamBody = io.TeeReader(rc, hasher)
 	}
 
 	if err := dst.Put(ctx, job.RelPath, streamBody, size); err != nil {
@@ -264,12 +264,9 @@ func (r *Replicator) process(log *zap.Logger, job CopyJob) error {
 				dst.Delete(ctx, job.RelPath) //nolint:errcheck
 				return fmt.Errorf("digest verification: %w", err)
 			}
-		} else if hashBuf != nil {
-			// Remote destination: hash the bytes we streamed through the tee.
-			got, herr := digest.Compute(hashBuf)
-			if herr != nil {
-				return fmt.Errorf("compute stream digest: %w", herr)
-			}
+		} else if hasher != nil {
+			// Remote destination: use the digest computed inline during streaming.
+			got := hasher.Sum()
 			if got != file.Digest {
 				dst.Delete(ctx, job.RelPath) //nolint:errcheck
 				return fmt.Errorf("%w: want %s got %s", domain.ErrDigestMismatch, file.Digest, got)

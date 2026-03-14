@@ -205,8 +205,8 @@ match = "**"
 
 func TestResolve_CapacityParsing(t *testing.T) {
 	cases := []struct {
-		s       string
-		wantB   int64
+		s         string
+		wantB     int64
 		unlimited bool
 	}{
 		{"500GiB", 500 * 1024 * 1024 * 1024, false},

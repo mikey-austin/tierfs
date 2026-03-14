@@ -13,27 +13,31 @@ import (
 
 // Config is the root configuration structure, loaded from TOML.
 type Config struct {
-	Mount           MountConfig          `toml:"mount"`
-	Replication     ReplicationConfig    `toml:"replication"`
-	Eviction        EvictionConfig       `toml:"eviction"`
-	Observability   ObservabilityConfig  `toml:"observability"`
-	Backends        []BackendConfig      `toml:"backend"`
-	Tiers           []TierConfig         `toml:"tier"`
-	Rules           []RuleConfig         `toml:"rule"`
+	Mount         MountConfig         `toml:"mount"`
+	Replication   ReplicationConfig   `toml:"replication"`
+	Eviction      EvictionConfig      `toml:"eviction"`
+	Observability ObservabilityConfig `toml:"observability"`
+	Backends      []BackendConfig     `toml:"backend"`
+	Tiers         []TierConfig        `toml:"tier"`
+	Rules         []RuleConfig        `toml:"rule"`
 }
 
 type MountConfig struct {
-	Path     string `toml:"path"`
-	MetaDB   string `toml:"meta_db"`
-	StageDir string `toml:"stage_dir"`
+	Path            string `toml:"path"`
+	MetaDB          string `toml:"meta_db"`
+	StageDir        string `toml:"stage_dir"`
+	EntryTimeout    string `toml:"entry_timeout"`
+	AttrTimeout     string `toml:"attr_timeout"`
+	NegativeTimeout string `toml:"negative_timeout"`
 }
 
 type ReplicationConfig struct {
-	Workers         int           `toml:"workers"`
-	RetryInterval   string        `toml:"retry_interval"`
-	MaxRetries      int           `toml:"max_retries"`
-	Verify          string        `toml:"verify"`          // none | size | digest
-	WriteQuiescence string        `toml:"write_quiescence"` // min idle time after last write close before replication
+	Workers         int    `toml:"workers"`
+	RetryInterval   string `toml:"retry_interval"`
+	MaxRetries      int    `toml:"max_retries"`
+	Verify          string `toml:"verify"`           // none | size | digest
+	WriteQuiescence string `toml:"write_quiescence"` // min idle time after last write close before replication
+	SweepInterval   string `toml:"sweep_interval"`   // how often to re-enqueue StateLocal files
 }
 
 type EvictionConfig struct {
@@ -56,11 +60,11 @@ type BackendConfig struct {
 	SMBDomain            string `toml:"smb_domain"`             // Windows/AD domain; empty for workgroup NAS
 	SMBRequireEncryption bool   `toml:"smb_require_encryption"` // require SMB3 encryption
 	// SFTP-specific fields (only for sftp:// URIs)
-	SFTPUsername       string `toml:"sftp_username"`        // prefer TIERFS_SFTP_USER env var
-	SFTPPassword       string `toml:"sftp_password"`        // prefer TIERFS_SFTP_PASS env var
-	SFTPKeyPath        string `toml:"sftp_key_path"`        // path to PEM private key; prefer TIERFS_SFTP_KEY_PATH
-	SFTPKeyPassphrase  string `toml:"sftp_key_passphrase"`  // decrypts encrypted key; prefer TIERFS_SFTP_KEY_PASSPHRASE
-	SFTPHostKey        string `toml:"sftp_host_key"`        // expected host key in authorized_keys format
+	SFTPUsername       string `toml:"sftp_username"`         // prefer TIERFS_SFTP_USER env var
+	SFTPPassword       string `toml:"sftp_password"`         // prefer TIERFS_SFTP_PASS env var
+	SFTPKeyPath        string `toml:"sftp_key_path"`         // path to PEM private key; prefer TIERFS_SFTP_KEY_PATH
+	SFTPKeyPassphrase  string `toml:"sftp_key_passphrase"`   // decrypts encrypted key; prefer TIERFS_SFTP_KEY_PASSPHRASE
+	SFTPHostKey        string `toml:"sftp_host_key"`         // expected host key in authorized_keys format
 	SFTPKnownHostsFile string `toml:"sftp_known_hosts_file"` // path to known_hosts file
 	// Transform applies compression and/or encryption to data at rest.
 	// Compression is always applied before encryption on the write path.
@@ -170,7 +174,7 @@ type Resolved struct {
 	Eviction      EvictionResolved
 	Observability ObservabilityConfig
 	Backends      map[string]BackendConfig
-	Tiers         []TierResolved  // sorted by priority ascending
+	Tiers         []TierResolved // sorted by priority ascending
 	TiersByName   map[string]*TierResolved
 	Policy        *domain.PolicyEngine
 }
@@ -181,6 +185,7 @@ type ReplicationResolved struct {
 	MaxRetries      int
 	Verify          string
 	WriteQuiescence time.Duration
+	SweepInterval   time.Duration
 }
 
 type EvictionResolved struct {
@@ -367,12 +372,21 @@ func (cfg *Config) resolveReplication() (ReplicationResolved, error) {
 		}
 		writeQuiescence = d
 	}
+	sweepInterval := 30 * time.Second
+	if rc.SweepInterval != "" {
+		d, err := time.ParseDuration(rc.SweepInterval)
+		if err != nil {
+			return ReplicationResolved{}, fmt.Errorf("replication.sweep_interval: %w", err)
+		}
+		sweepInterval = d
+	}
 	return ReplicationResolved{
 		Workers:         workers,
 		RetryInterval:   retryInterval,
 		MaxRetries:      maxRetries,
 		Verify:          verify,
 		WriteQuiescence: writeQuiescence,
+		SweepInterval:   sweepInterval,
 	}, nil
 }
 
@@ -454,6 +468,29 @@ func (r *Resolved) HottestTier() *TierResolved {
 		}
 	}
 	return hot
+}
+
+// MountCacheTimeouts returns the parsed FUSE cache TTLs, defaulting to 1s.
+func (m MountConfig) MountCacheTimeouts() (entry, attr, negative time.Duration) {
+	entry = 1 * time.Second
+	attr = 1 * time.Second
+	negative = 1 * time.Second
+	if m.EntryTimeout != "" {
+		if d, err := time.ParseDuration(m.EntryTimeout); err == nil {
+			entry = d
+		}
+	}
+	if m.AttrTimeout != "" {
+		if d, err := time.ParseDuration(m.AttrTimeout); err == nil {
+			attr = d
+		}
+	}
+	if m.NegativeTimeout != "" {
+		if d, err := time.ParseDuration(m.NegativeTimeout); err == nil {
+			negative = d
+		}
+	}
+	return
 }
 
 // parseCapacity parses strings like "500GiB", "8TiB", "unlimited".

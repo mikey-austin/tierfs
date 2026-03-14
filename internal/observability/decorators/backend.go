@@ -57,7 +57,7 @@ func NewObservableBackend(
 // Ensure interface compliance at compile time.
 var _ domain.Backend = (*ObservableBackend)(nil)
 
-func (o *ObservableBackend) Scheme() string { return o.inner.Scheme() }
+func (o *ObservableBackend) Scheme() string            { return o.inner.Scheme() }
 func (o *ObservableBackend) URI(relPath string) string { return o.inner.URI(relPath) }
 func (o *ObservableBackend) LocalPath(relPath string) (string, bool) {
 	return o.inner.LocalPath(relPath)

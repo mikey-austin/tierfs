@@ -92,6 +92,22 @@ func (b *Backend) IsFinal() bool {
 	return false
 }
 
+// Rename delegates to the inner backend if it implements domain.Renamer.
+func (b *Backend) Rename(ctx context.Context, oldRel, newRel string) error {
+	if r, ok := b.inner.(domain.Renamer); ok {
+		return r.Rename(ctx, oldRel, newRel)
+	}
+	return fmt.Errorf("transform: inner backend does not support rename")
+}
+
+// Utimes delegates to the inner backend if it implements domain.Utimer.
+func (b *Backend) Utimes(relPath string, atime, mtime time.Time) error {
+	if u, ok := b.inner.(domain.Utimer); ok {
+		return u.Utimes(relPath, atime, mtime)
+	}
+	return fmt.Errorf("transform: inner backend does not support utimes")
+}
+
 // Put transforms data from r through the pipeline (in order) and writes the
 // result to the inner backend.
 //

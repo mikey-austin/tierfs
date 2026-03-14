@@ -38,8 +38,8 @@ type fakeBackend struct {
 	data []byte
 }
 
-func (f *fakeBackend) Scheme() string                   { return "fake" }
-func (f *fakeBackend) URI(relPath string) string        { return "fake://" + relPath }
+func (f *fakeBackend) Scheme() string                    { return "fake" }
+func (f *fakeBackend) URI(relPath string) string         { return "fake://" + relPath }
 func (f *fakeBackend) LocalPath(_ string) (string, bool) { return "", false }
 
 func (f *fakeBackend) Put(_ context.Context, _ string, r io.Reader, _ int64) error {
@@ -85,7 +85,7 @@ func (f *fakeMetaStore) UpsertFile(_ context.Context, _ domain.File) error { ret
 func (f *fakeMetaStore) GetFile(_ context.Context, _ string) (*domain.File, error) {
 	return &domain.File{RelPath: "x.mp4"}, f.getErr
 }
-func (f *fakeMetaStore) DeleteFile(_ context.Context, _ string) error           { return nil }
+func (f *fakeMetaStore) DeleteFile(_ context.Context, _ string) error { return nil }
 func (f *fakeMetaStore) ListFiles(_ context.Context, _ string) ([]domain.File, error) {
 	return nil, nil
 }
@@ -107,6 +107,9 @@ func (f *fakeMetaStore) FilesOnTier(_ context.Context, _ string) ([]domain.File,
 func (f *fakeMetaStore) FilesAwaitingReplication(_ context.Context) ([]domain.File, error) {
 	return nil, nil
 }
+func (f *fakeMetaStore) EvictionCandidates(_ context.Context, _ string, _ time.Time) ([]domain.File, error) {
+	return nil, nil
+}
 func (f *fakeMetaStore) ListDir(_ context.Context, _ string) ([]domain.FileInfo, error) {
 	return nil, nil
 }
@@ -114,9 +117,9 @@ func (f *fakeMetaStore) Close() error { return nil }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-func newReg() *metrics.Registry  { return metrics.New() }
+func newReg() *metrics.Registry       { return metrics.New() }
 func newLog(t *testing.T) *zap.Logger { return zaptest.NewLogger(t) }
-func newTracer()                  { /* noop */ }
+func newTracer()                      { /* noop */ }
 
 // ── Backend decorator tests ──────────────────────────────────────────────────
 

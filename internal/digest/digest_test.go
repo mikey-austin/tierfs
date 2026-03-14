@@ -54,6 +54,34 @@ func TestVerify_Match(t *testing.T) {
 	assert.NoError(t, digest.Verify(p, d))
 }
 
+func TestHasher_MatchesCompute(t *testing.T) {
+	data := []byte("hello tierfs storage tiering")
+	expected, err := digest.Compute(bytes.NewReader(data))
+	require.NoError(t, err)
+
+	h := digest.NewHasher()
+	_, err = h.Write(data)
+	require.NoError(t, err)
+	got := h.Sum()
+	assert.Equal(t, expected, got)
+}
+
+func TestHasher_IncrementalWrites(t *testing.T) {
+	data := bytes.Repeat([]byte("chunk"), 1000)
+	expected, err := digest.Compute(bytes.NewReader(data))
+	require.NoError(t, err)
+
+	h := digest.NewHasher()
+	for i := 0; i < len(data); i += 7 {
+		end := i + 7
+		if end > len(data) {
+			end = len(data)
+		}
+		h.Write(data[i:end])
+	}
+	assert.Equal(t, expected, h.Sum())
+}
+
 func TestVerify_Mismatch(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "v.bin")
 	require.NoError(t, os.WriteFile(p, []byte("real data"), 0o644))

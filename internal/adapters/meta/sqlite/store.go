@@ -17,8 +17,8 @@ import (
 
 // Store implements domain.MetadataStore.
 type Store struct {
-	db   *sql.DB
-	mu   sync.Mutex // serialises writes
+	db *sql.DB
+	mu sync.Mutex // serialises writes
 }
 
 // Open opens (or creates) the SQLite database at path and applies the schema.
@@ -198,6 +198,22 @@ func (s *Store) FilesOnTier(ctx context.Context, tierName string) ([]domain.File
 		WHERE current_tier = ? AND state = 'synced'`, tierName)
 	if err != nil {
 		return nil, fmt.Errorf("files on tier: %w", err)
+	}
+	defer rows.Close()
+	return scanFiles(rows)
+}
+
+func (s *Store) EvictionCandidates(ctx context.Context, tierName string, olderThan time.Time) ([]domain.File, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT f.rel_path, f.current_tier, f.state, f.size, f.mod_time, f.digest
+		FROM files f
+		INNER JOIN file_tiers ft ON f.rel_path = ft.rel_path AND ft.tier_name = f.current_tier
+		WHERE f.current_tier = ?
+		  AND f.state = 'synced'
+		  AND ft.arrived_at < ?`,
+		tierName, olderThan.UnixNano())
+	if err != nil {
+		return nil, fmt.Errorf("eviction candidates: %w", err)
 	}
 	defer rows.Close()
 	return scanFiles(rows)

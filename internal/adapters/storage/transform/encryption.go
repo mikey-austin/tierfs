@@ -31,10 +31,10 @@ const (
 )
 
 var (
-	streamMagicBytes   = []byte(streamMagic)
-	errBadMagic        = errors.New("aes-256-gcm: not a tierfs encrypted stream (bad magic)")
-	errAuthFailed      = errors.New("aes-256-gcm: authentication failed — data is corrupt or key is wrong")
-	errChunkTooLarge   = errors.New("aes-256-gcm: chunk size exceeds maximum")
+	streamMagicBytes = []byte(streamMagic)
+	errBadMagic      = errors.New("aes-256-gcm: not a tierfs encrypted stream (bad magic)")
+	errAuthFailed    = errors.New("aes-256-gcm: authentication failed — data is corrupt or key is wrong")
+	errChunkTooLarge = errors.New("aes-256-gcm: chunk size exceeds maximum")
 )
 
 // AES256GCMTransform implements [Transform] using AES-256-GCM authenticated

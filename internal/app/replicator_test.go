@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap/zaptest"
 
 	"github.com/mikey-austin/tierfs/internal/app"
+	"github.com/mikey-austin/tierfs/internal/digest"
 	"github.com/mikey-austin/tierfs/internal/domain"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -132,15 +133,109 @@ func TestReplicator_Metrics(t *testing.T) {
 	assert.Equal(t, int64(0), depth)
 }
 
-// failingBackend fails the first N Put calls, then succeeds.
-type failingBackend struct {
-	inner   *memBackend
-	failN   int
-	callN   int
+func TestReplicator_StalenessNoFalsePositive(t *testing.T) {
+	meta := newMemMeta()
+	ctx := context.Background()
+
+	src := newMemBackend("tier0")
+	dst := newMemBackend("tier1")
+	data := []byte("staleness test data")
+
+	// Use Put to populate both store and modTimes consistently.
+	require.NoError(t, src.Put(ctx, "test.mp4", bytes.NewReader(data), int64(len(data))))
+
+	// Read back the modTime the backend recorded, and use it in metadata.
+	src.mu.Lock()
+	backendMtime := src.modTimes["test.mp4"]
+	src.mu.Unlock()
+
+	require.NoError(t, meta.UpsertFile(ctx, domain.File{
+		RelPath:     "test.mp4",
+		CurrentTier: "tier0",
+		State:       domain.StateLocal,
+		Size:        int64(len(data)),
+		ModTime:     backendMtime,
+		Digest:      "deadbeef",
+	}))
+
+	lookup := &fakeTierLookup{backends: map[string]domain.Backend{"tier0": src, "tier1": dst}}
+	log := zaptest.NewLogger(t)
+	cfg := app.ReplicatorConfig{
+		Workers:       1,
+		MaxRetries:    1,
+		RetryInterval: 10 * time.Millisecond,
+		Verify:        "none",
+	}
+	r := app.NewReplicator(cfg, meta, lookup, log)
+	r.Start()
+	defer r.Stop()
+
+	r.Enqueue(app.CopyJob{RelPath: "test.mp4", FromTier: "tier0", ToTier: "tier1"})
+
+	require.Eventually(t, func() bool {
+		dst.mu.Lock()
+		_, ok := dst.store["test.mp4"]
+		dst.mu.Unlock()
+		return ok
+	}, 3*time.Second, 50*time.Millisecond,
+		"file should arrive on tier1 without false staleness abort")
 }
 
-func (f *failingBackend) Scheme() string { return f.inner.Scheme() }
-func (f *failingBackend) URI(p string) string { return f.inner.URI(p) }
+func TestReplicator_DigestVerifyRemote(t *testing.T) {
+	meta := newMemMeta()
+	ctx := context.Background()
+
+	src := newMemBackend("tier0")
+	dst := newMemBackend("tier1")
+	data := bytes.Repeat([]byte("digest-verify"), 200)
+	src.mu.Lock()
+	src.store["video.mp4"] = data
+	src.mu.Unlock()
+
+	d, err := digest.Compute(bytes.NewReader(data))
+	require.NoError(t, err)
+
+	require.NoError(t, meta.UpsertFile(ctx, domain.File{
+		RelPath:     "video.mp4",
+		CurrentTier: "tier0",
+		State:       domain.StateLocal,
+		Size:        int64(len(data)),
+		Digest:      d,
+	}))
+
+	lookup := &fakeTierLookup{backends: map[string]domain.Backend{"tier0": src, "tier1": dst}}
+	cfg := app.ReplicatorConfig{
+		Workers:       1,
+		MaxRetries:    1,
+		RetryInterval: 10 * time.Millisecond,
+		Verify:        "digest",
+	}
+	r := app.NewReplicator(cfg, meta, lookup, zaptest.NewLogger(t))
+	r.Start()
+	defer r.Stop()
+
+	r.Enqueue(app.CopyJob{RelPath: "video.mp4", FromTier: "tier0", ToTier: "tier1"})
+
+	require.Eventually(t, func() bool {
+		ok, _ := meta.IsTierVerified(ctx, "video.mp4", "tier1")
+		return ok
+	}, 3*time.Second, 50*time.Millisecond, "remote digest verify should succeed")
+
+	dst.mu.Lock()
+	got := dst.store["video.mp4"]
+	dst.mu.Unlock()
+	assert.Equal(t, data, got)
+}
+
+// failingBackend fails the first N Put calls, then succeeds.
+type failingBackend struct {
+	inner *memBackend
+	failN int
+	callN int
+}
+
+func (f *failingBackend) Scheme() string                    { return f.inner.Scheme() }
+func (f *failingBackend) URI(p string) string               { return f.inner.URI(p) }
 func (f *failingBackend) LocalPath(p string) (string, bool) { return f.inner.LocalPath(p) }
 func (f *failingBackend) Stat(ctx context.Context, p string) (*domain.FileInfo, error) {
 	return f.inner.Stat(ctx, p)

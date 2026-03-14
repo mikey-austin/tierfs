@@ -18,8 +18,8 @@ const (
 
 // File is the authoritative record for a managed file.
 type File struct {
-	RelPath     string    // path relative to mount root, e.g. "recordings/cam1/2026-03/13/10/30.00.mp4"
-	CurrentTier string    // name of the tier serving reads right now
+	RelPath     string // path relative to mount root, e.g. "recordings/cam1/2026-03/13/10/30.00.mp4"
+	CurrentTier string // name of the tier serving reads right now
 	State       TierState
 	Size        int64
 	ModTime     time.Time

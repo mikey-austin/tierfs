@@ -7,9 +7,9 @@ import (
 
 // ObservabilityConfig is embedded in the root Config.
 type ObservabilityConfig struct {
-	Logging  LoggingConfig  `toml:"logging"`
-	Metrics  MetricsConfig  `toml:"metrics"`
-	Tracing  TracingConfig  `toml:"tracing"`
+	Logging LoggingConfig `toml:"logging"`
+	Metrics MetricsConfig `toml:"metrics"`
+	Tracing TracingConfig `toml:"tracing"`
 }
 
 // LoggingConfig controls structured log output.

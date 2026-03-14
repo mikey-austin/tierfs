@@ -22,17 +22,18 @@ import (
 // ── Stubs ────────────────────────────────────────────────────────────────────
 
 type memBackend struct {
-	mu    sync.Mutex
-	name  string
-	store map[string][]byte
+	mu       sync.Mutex
+	name     string
+	store    map[string][]byte
+	modTimes map[string]time.Time
 }
 
 func newMemBackend(name string) *memBackend {
-	return &memBackend{name: name, store: make(map[string][]byte)}
+	return &memBackend{name: name, store: make(map[string][]byte), modTimes: make(map[string]time.Time)}
 }
 
-func (m *memBackend) Scheme() string { return "mem" }
-func (m *memBackend) URI(p string) string { return "mem://" + m.name + "/" + p }
+func (m *memBackend) Scheme() string                    { return "mem" }
+func (m *memBackend) URI(p string) string               { return "mem://" + m.name + "/" + p }
 func (m *memBackend) LocalPath(_ string) (string, bool) { return "", false }
 
 func (m *memBackend) Put(_ context.Context, relPath string, r io.Reader, _ int64) error {
@@ -42,6 +43,7 @@ func (m *memBackend) Put(_ context.Context, relPath string, r io.Reader, _ int64
 	}
 	m.mu.Lock()
 	m.store[relPath] = data
+	m.modTimes[relPath] = time.Now()
 	m.mu.Unlock()
 	return nil
 }
@@ -63,7 +65,7 @@ func (m *memBackend) Stat(_ context.Context, relPath string) (*domain.FileInfo, 
 	if !ok {
 		return nil, domain.ErrNotExist
 	}
-	return &domain.FileInfo{RelPath: relPath, Size: int64(len(d))}, nil
+	return &domain.FileInfo{RelPath: relPath, Size: int64(len(d)), ModTime: m.modTimes[relPath]}, nil
 }
 
 func (m *memBackend) Delete(_ context.Context, relPath string) error {
@@ -219,6 +221,24 @@ func (m *memMeta) FilesAwaitingReplication(_ context.Context) ([]domain.File, er
 	return out, nil
 }
 
+func (m *memMeta) EvictionCandidates(_ context.Context, tierName string, olderThan time.Time) ([]domain.File, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []domain.File
+	for _, f := range m.files {
+		if f.CurrentTier != tierName || f.State != domain.StateSynced {
+			continue
+		}
+		for _, ft := range m.fileTiers[f.RelPath] {
+			if ft.TierName == tierName && ft.ArrivedAt.Before(olderThan) {
+				out = append(out, f)
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
 func (m *memMeta) ListDir(_ context.Context, _ string) ([]domain.FileInfo, error) {
 	return nil, nil
 }
@@ -237,6 +257,7 @@ meta_db = "/tmp/test.db"
 [replication]
 workers = 1
 verify  = "none"
+sweep_interval = "50ms"
 
 [eviction]
 check_interval = "1h"
@@ -368,8 +389,13 @@ func TestTierService_OnDelete(t *testing.T) {
 }
 
 func TestTierService_OnRename(t *testing.T) {
-	ts, meta, _ := makeTierService(t)
+	ts, meta, backends := makeTierService(t)
 	ctx := context.Background()
+
+	// Seed data so copy+delete fallback works (memBackend has no Rename).
+	backends["tier0"].mu.Lock()
+	backends["tier0"].store["recordings/old.mp4"] = []byte("rename data")
+	backends["tier0"].mu.Unlock()
 
 	require.NoError(t, meta.UpsertFile(ctx, domain.File{
 		RelPath:     "recordings/old.mp4",
@@ -388,6 +414,94 @@ func TestTierService_OnRename(t *testing.T) {
 	f, err := meta.GetFile(ctx, "recordings/new.mp4")
 	require.NoError(t, err)
 	assert.Equal(t, "recordings/new.mp4", f.RelPath)
+
+	// Verify backend has new key, not old.
+	backends["tier0"].mu.Lock()
+	_, hasOld := backends["tier0"].store["recordings/old.mp4"]
+	_, hasNew := backends["tier0"].store["recordings/new.mp4"]
+	backends["tier0"].mu.Unlock()
+	assert.False(t, hasOld, "old key should be gone from backend")
+	assert.True(t, hasNew, "new key should exist in backend")
+}
+
+func TestTierService_OnRename_FailureNoMetadataUpdate(t *testing.T) {
+	ts, meta, _ := makeTierService(t)
+	ctx := context.Background()
+
+	// Don't seed backend data — Get will fail, so copy+delete fails.
+	require.NoError(t, meta.UpsertFile(ctx, domain.File{
+		RelPath:     "recordings/fail.mp4",
+		CurrentTier: "tier0",
+		State:       domain.StateLocal,
+	}))
+	require.NoError(t, meta.AddFileTier(ctx, domain.FileTier{
+		RelPath:  "recordings/fail.mp4",
+		TierName: "tier0",
+	}))
+
+	err := ts.OnRename(ctx, "recordings/fail.mp4", "recordings/moved.mp4")
+	assert.Error(t, err, "rename should fail when backend can't rename or copy")
+
+	f, gerr := meta.GetFile(ctx, "recordings/fail.mp4")
+	require.NoError(t, gerr)
+	assert.Equal(t, "recordings/fail.mp4", f.RelPath)
+
+	_, gerr = meta.GetFile(ctx, "recordings/moved.mp4")
+	assert.ErrorIs(t, gerr, domain.ErrNotExist)
+}
+
+func TestTierService_OnWriteComplete_ResetsState(t *testing.T) {
+	ts, meta, _ := makeTierService(t)
+	ctx := context.Background()
+
+	require.NoError(t, meta.UpsertFile(ctx, domain.File{
+		RelPath:     "recordings/cam1/truncated.mp4",
+		CurrentTier: "tier0",
+		State:       domain.StateSynced,
+		Size:        2048,
+		Digest:      "olddigest",
+	}))
+
+	err := ts.OnWriteComplete(ctx, "recordings/cam1/truncated.mp4", "tier0", 512, time.Now())
+	require.NoError(t, err)
+
+	f, err := meta.GetFile(ctx, "recordings/cam1/truncated.mp4")
+	require.NoError(t, err)
+	assert.Equal(t, domain.StateLocal, f.State)
+	assert.Equal(t, int64(512), f.Size)
+}
+
+func TestTierService_SweepRecoversDrop(t *testing.T) {
+	cfg := makeConfig(t)
+	meta := newMemMeta()
+	ctx := context.Background()
+
+	b0 := newMemBackend("tier0")
+	b1 := newMemBackend("tier1")
+	backends := map[string]domain.Backend{"tier0": b0, "tier1": b1}
+	log := zaptest.NewLogger(t)
+
+	ts := app.NewTierService(cfg, meta, backends, log)
+	ts.Start()
+	defer ts.Stop()
+
+	data := []byte("sweep recovery test")
+	b0.mu.Lock()
+	b0.store["recordings/sweep.mp4"] = data
+	b0.mu.Unlock()
+
+	require.NoError(t, meta.UpsertFile(ctx, domain.File{
+		RelPath:     "recordings/sweep.mp4",
+		CurrentTier: "tier0",
+		State:       domain.StateLocal,
+		Size:        int64(len(data)),
+		ModTime:     time.Now(),
+	}))
+
+	require.Eventually(t, func() bool {
+		f, err := meta.GetFile(ctx, "recordings/sweep.mp4")
+		return err == nil && f.State == domain.StateSynced
+	}, 5*time.Second, 100*time.Millisecond, "sweep should re-enqueue and replicate the file")
 }
 
 func TestTierService_BackendFor_Unknown(t *testing.T) {

@@ -35,13 +35,13 @@ func newTestBackend(t *testing.T) *sftpbackend.Backend {
 	require.NoError(t, err)
 
 	cfg := sftpbackend.Config{
-		Name:           "integration-test",
-		URI:            uri,
-		Username:       uriUser,
-		KeyPath:        os.Getenv("TIERFS_SFTP_KEY_PATH"),
-		KeyPassphrase:  os.Getenv("TIERFS_SFTP_KEY_PASSPHRASE"),
-		Password:       os.Getenv("TIERFS_SFTP_PASS"),
-		HostKey:        os.Getenv("TIERFS_SFTP_HOST_KEY"),
+		Name:          "integration-test",
+		URI:           uri,
+		Username:      uriUser,
+		KeyPath:       os.Getenv("TIERFS_SFTP_KEY_PATH"),
+		KeyPassphrase: os.Getenv("TIERFS_SFTP_KEY_PASSPHRASE"),
+		Password:      os.Getenv("TIERFS_SFTP_PASS"),
+		HostKey:       os.Getenv("TIERFS_SFTP_HOST_KEY"),
 	}
 	log := zaptest.NewLogger(t)
 	b, err := sftpbackend.New(cfg, log)

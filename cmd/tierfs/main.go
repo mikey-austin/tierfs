@@ -13,13 +13,13 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/mikey-austin/tierfs/internal/adapters/fuse"
+	"github.com/mikey-austin/tierfs/internal/adapters/meta/sqlite"
 	filerbackend "github.com/mikey-austin/tierfs/internal/adapters/storage/file"
 	nullbackend "github.com/mikey-austin/tierfs/internal/adapters/storage/null"
 	s3backend "github.com/mikey-austin/tierfs/internal/adapters/storage/s3"
 	sftpbackend "github.com/mikey-austin/tierfs/internal/adapters/storage/sftp"
 	smbbackend "github.com/mikey-austin/tierfs/internal/adapters/storage/smb"
 	"github.com/mikey-austin/tierfs/internal/adapters/storage/transform"
-	"github.com/mikey-austin/tierfs/internal/adapters/meta/sqlite"
 	"github.com/mikey-austin/tierfs/internal/app"
 	"github.com/mikey-austin/tierfs/internal/config"
 	"github.com/mikey-austin/tierfs/internal/domain"
@@ -102,7 +102,13 @@ func run(cfgPath string) error {
 
 	// ── FUSE mount ────────────────────────────────────────────────────────────
 	tierFS := fuse.New(svc, meta, stager, log)
-	server, err := fuse.Mount(tierFS, cfg.Mount.Path, log)
+	entryTTL, attrTTL, negTTL := cfg.Mount.MountCacheTimeouts()
+	cache := fuse.CacheConfig{
+		EntryTimeout:    entryTTL,
+		AttrTimeout:     attrTTL,
+		NegativeTimeout: negTTL,
+	}
+	server, err := fuse.Mount(tierFS, cfg.Mount.Path, cache, log)
 	if err != nil {
 		return fmt.Errorf("mount fuse: %w", err)
 	}
@@ -159,14 +165,14 @@ func buildBackend(cfg config.BackendConfig, log *zap.Logger) (domain.Backend, er
 		})
 	case "sftp":
 		return sftpbackend.New(sftpbackend.Config{
-			Name:              cfg.Name,
-			URI:               cfg.URI,
-			Username:          cfg.SFTPUsername,
-			Password:          cfg.SFTPPassword,
-			KeyPath:           cfg.SFTPKeyPath,
-			KeyPassphrase:     cfg.SFTPKeyPassphrase,
-			HostKey:           cfg.SFTPHostKey,
-			KnownHostsFile:    cfg.SFTPKnownHostsFile,
+			Name:           cfg.Name,
+			URI:            cfg.URI,
+			Username:       cfg.SFTPUsername,
+			Password:       cfg.SFTPPassword,
+			KeyPath:        cfg.SFTPKeyPath,
+			KeyPassphrase:  cfg.SFTPKeyPassphrase,
+			HostKey:        cfg.SFTPHostKey,
+			KnownHostsFile: cfg.SFTPKnownHostsFile,
 		}, log)
 	case "smb":
 		return smbbackend.New(smbbackend.Config{

@@ -89,8 +89,8 @@ func New(cfg Config) (*Backend, error) {
 	})
 
 	uploader := manager.NewUploader(client, func(u *manager.Uploader) {
-		u.PartSize         = multipartPartSize
-		u.Concurrency      = multipartConcurrency
+		u.PartSize = multipartPartSize
+		u.Concurrency = multipartConcurrency
 		u.LeavePartsOnError = false
 	})
 

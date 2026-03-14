@@ -2,9 +2,12 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"net/url"
-	"strings"
+	"os"
+	"path/filepath"
 	"time"
 
 	"go.uber.org/zap"
@@ -25,6 +28,8 @@ type TierService struct {
 	evictor    *Evictor
 	guard      *WriteGuard
 	log        *zap.Logger
+	sweepStop  chan struct{}
+	sweepDone  chan struct{}
 }
 
 // NewTierService constructs TierService and registers all backends.
@@ -36,26 +41,33 @@ func NewTierService(
 	log *zap.Logger,
 ) *TierService {
 	ts := &TierService{
-		cfg:      cfg,
-		meta:     meta,
-		backends: backends,
-		guard:    NewWriteGuard(cfg.Replication.WriteQuiescence),
-		log:      log.Named("tier-service"),
+		cfg:       cfg,
+		meta:      meta,
+		backends:  backends,
+		guard:     NewWriteGuard(cfg.Replication.WriteQuiescence),
+		log:       log.Named("tier-service"),
+		sweepStop: make(chan struct{}),
+		sweepDone: make(chan struct{}),
 	}
 
 	replCfg := ReplicatorConfig{
-		Workers:         cfg.Replication.Workers,
-		MaxRetries:      cfg.Replication.MaxRetries,
-		RetryInterval:   cfg.Replication.RetryInterval,
-		Verify:          cfg.Replication.Verify,
-		WriteGuard:      ts.guard,
+		Workers:       cfg.Replication.Workers,
+		MaxRetries:    cfg.Replication.MaxRetries,
+		RetryInterval: cfg.Replication.RetryInterval,
+		Verify:        cfg.Replication.Verify,
+		WriteGuard:    ts.guard,
 	}
 	ts.replicator = NewReplicator(replCfg, meta, ts, log)
 
+	tierNames := make([]string, len(cfg.Tiers))
+	for i, t := range cfg.Tiers {
+		tierNames[i] = t.Name
+	}
 	evictCfg := EvictorConfig{
 		CheckInterval:     cfg.Eviction.CheckInterval,
 		CapacityThreshold: cfg.Eviction.CapacityThreshold,
 		CapacityHeadroom:  cfg.Eviction.CapacityHeadroom,
+		TierNames:         tierNames,
 	}
 	ts.evictor = NewEvictor(evictCfg, meta, cfg.Policy, ts.replicator, ts, ts, log)
 
@@ -73,10 +85,13 @@ func (ts *TierService) Start() {
 
 	// Re-queue any files that were awaiting replication before last shutdown.
 	go ts.requeuePending()
+	go ts.sweepLoop()
 }
 
 // Stop drains workers and shuts down all background goroutines.
 func (ts *TierService) Stop() {
+	close(ts.sweepStop)
+	<-ts.sweepDone
 	ts.evictor.Stop()
 	ts.replicator.Stop()
 	ts.log.Info("tier service stopped")
@@ -91,6 +106,15 @@ func (ts *TierService) BackendFor(tierName string) (domain.Backend, error) {
 		return nil, fmt.Errorf("%w: %q", domain.ErrTierNotFound, tierName)
 	}
 	return b, nil
+}
+
+// TierNames returns the names of all configured tiers.
+func (ts *TierService) TierNames() []string {
+	names := make([]string, len(ts.cfg.Tiers))
+	for i, t := range ts.cfg.Tiers {
+		names[i] = t.Name
+	}
+	return names
 }
 
 // ── TierCapacity (used by Evictor) ───────────────────────────────────────────
@@ -246,6 +270,7 @@ func (ts *TierService) PromoteToHot(ctx context.Context, relPath string) (domain
 	localPath, _ := dst.LocalPath(relPath)
 	return dst, localPath, nil
 }
+
 // It computes the digest, updates metadata, and enqueues replication if needed.
 func (ts *TierService) OnWriteComplete(ctx context.Context, relPath, tierName string, size int64, modTime time.Time) error {
 	b, err := ts.BackendFor(tierName)
@@ -254,11 +279,17 @@ func (ts *TierService) OnWriteComplete(ctx context.Context, relPath, tierName st
 	}
 
 	// Compute digest from the local path (fast; file is on SSD).
+	// Also use the file's actual mtime from the filesystem to ensure the
+	// staleness check in the replicator compares identical values.
 	var dig string
 	if localPath, ok := b.LocalPath(relPath); ok {
 		dig, err = digest.ComputeFile(localPath)
 		if err != nil {
 			ts.log.Warn("digest computation failed", zap.String("path", relPath), zap.Error(err))
+		}
+		if st, serr := os.Stat(localPath); serr == nil {
+			modTime = st.ModTime()
+			size = st.Size()
 		}
 	}
 
@@ -332,6 +363,8 @@ func (ts *TierService) OnDelete(ctx context.Context, relPath string) error {
 }
 
 // OnRename updates metadata and renames the file on all tiers it is present on.
+// The operation is transactional: metadata is only updated after all backend
+// renames (or copy+delete fallbacks) succeed.
 func (ts *TierService) OnRename(ctx context.Context, oldPath, newPath string) error {
 	f, err := ts.meta.GetFile(ctx, oldPath)
 	if err != nil {
@@ -342,29 +375,40 @@ func (ts *TierService) OnRename(ctx context.Context, oldPath, newPath string) er
 		return err
 	}
 
-	// Rename on every tier that has the file.
+	// Phase 1: Rename on every tier. Use copy+delete fallback if needed.
 	for _, ft := range tiers {
 		b, berr := ts.BackendFor(ft.TierName)
 		if berr != nil {
-			continue
+			return fmt.Errorf("rename: backend %q not found: %w", ft.TierName, berr)
 		}
-		type renamer interface {
-			Rename(ctx context.Context, oldRel, newRel string) error
-		}
-		if r, ok := b.(renamer); ok {
-			if rerr := r.Rename(ctx, oldPath, newPath); rerr != nil {
-				ts.log.Warn("rename on tier failed",
-					zap.String("from", oldPath),
-					zap.String("to", newPath),
-					zap.String("tier", ft.TierName),
-					zap.Error(rerr),
-				)
+
+		// Try native rename first.
+		if r, ok := b.(domain.Renamer); ok {
+			if rerr := r.Rename(ctx, oldPath, newPath); rerr == nil {
+				continue
+			} else {
+				ts.log.Debug("native rename failed, trying copy+delete",
+					zap.String("tier", ft.TierName), zap.Error(rerr))
 			}
 		}
-		// For non-renameable backends (S3) we'd need a copy+delete; skip for now.
+
+		// Fallback: copy+delete.
+		rc, size, gerr := b.Get(ctx, oldPath)
+		if gerr != nil {
+			return fmt.Errorf("rename: copy from %q failed: %w", ft.TierName, gerr)
+		}
+		if perr := b.Put(ctx, newPath, rc, size); perr != nil {
+			rc.Close()
+			return fmt.Errorf("rename: put to %q failed: %w", ft.TierName, perr)
+		}
+		rc.Close()
+		if derr := b.Delete(ctx, oldPath); derr != nil && derr != domain.ErrNotExist {
+			ts.log.Warn("rename copy+delete: delete old failed",
+				zap.String("tier", ft.TierName), zap.Error(derr))
+		}
 	}
 
-	// Update metadata: delete old, insert new.
+	// Phase 2: All backends succeeded — update metadata.
 	if err := ts.meta.DeleteFile(ctx, oldPath); err != nil {
 		return err
 	}
@@ -379,6 +423,20 @@ func (ts *TierService) OnRename(ctx context.Context, oldPath, newPath string) er
 		}
 	}
 	return nil
+}
+
+func (ts *TierService) sweepLoop() {
+	defer close(ts.sweepDone)
+	ticker := time.NewTicker(ts.cfg.Replication.SweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ts.sweepStop:
+			return
+		case <-ticker.C:
+			ts.requeuePending()
+		}
+	}
 }
 
 // requeuePending re-enqueues files left in StateLocal from a previous run.
@@ -433,13 +491,73 @@ type Stager struct {
 	log      *zap.Logger
 }
 
+// StageMeta is persisted alongside staged files for freshness checks.
+type StageMeta struct {
+	Digest  string    `json:"digest"`
+	ModTime time.Time `json:"mtime"`
+	Size    int64     `json:"size"`
+}
+
 // NewStager creates a Stager using stageDir as scratch space.
 func NewStager(stageDir string, log *zap.Logger) *Stager {
 	return &Stager{stageDir: stageDir, log: log.Named("stager")}
 }
 
-// StagePath returns the path where a relPath would be staged.
+// StagePath returns a collision-free path in stageDir for the given relPath.
 func (s *Stager) StagePath(relPath string) string {
-	safe := strings.ReplaceAll(relPath, "/", "__")
-	return s.stageDir + "/" + safe
+	h := sha256.Sum256([]byte(relPath))
+	hex := fmt.Sprintf("%x", h[:8])
+	base := filepath.Base(relPath)
+	return filepath.Join(s.stageDir, hex+"_"+base)
+}
+
+// MetaPath returns the sidecar metadata path for a staged file.
+func (s *Stager) MetaPath(stagePath string) string {
+	return stagePath + ".meta"
+}
+
+// WriteMeta writes sidecar metadata for a staged file.
+func (s *Stager) WriteMeta(stagePath string, meta StageMeta) error {
+	data, err := json.Marshal(meta)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(s.MetaPath(stagePath), data, 0o644)
+}
+
+// ReadMeta reads sidecar metadata.
+func (s *Stager) ReadMeta(stagePath string) (StageMeta, error) {
+	data, err := os.ReadFile(s.MetaPath(stagePath))
+	if err != nil {
+		return StageMeta{}, err
+	}
+	var m StageMeta
+	if err := json.Unmarshal(data, &m); err != nil {
+		return StageMeta{}, err
+	}
+	return m, nil
+}
+
+// IsStale checks whether a staged file matches the authoritative metadata.
+func (s *Stager) IsStale(stagePath string, dgst string, modTime time.Time, size int64) bool {
+	meta, err := s.ReadMeta(stagePath)
+	if err != nil {
+		return true
+	}
+	if size > 0 && meta.Size != size {
+		return true
+	}
+	if dgst != "" && meta.Digest != dgst {
+		return true
+	}
+	if !modTime.IsZero() && meta.ModTime.Truncate(time.Microsecond) != modTime.Truncate(time.Microsecond) {
+		return true
+	}
+	return false
+}
+
+// CleanStale removes a staged file and its sidecar.
+func (s *Stager) CleanStale(stagePath string) {
+	os.Remove(stagePath)
+	os.Remove(s.MetaPath(stagePath))
 }

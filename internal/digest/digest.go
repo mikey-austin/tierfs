@@ -39,6 +39,27 @@ func ComputeFile(path string) (string, error) {
 	return fmt.Sprintf("%016x%016x", sum.Hi, sum.Lo), nil
 }
 
+// Hasher streams data through xxhash3-128. It implements io.Writer.
+type Hasher struct {
+	h *xxh3.Hasher
+}
+
+// NewHasher returns a streaming digest writer.
+func NewHasher() *Hasher {
+	return &Hasher{h: xxh3.New()}
+}
+
+// Write implements io.Writer.
+func (d *Hasher) Write(p []byte) (int, error) {
+	return d.h.Write(p)
+}
+
+// Sum returns the hex-encoded xxhash3-128 digest of all data written so far.
+func (d *Hasher) Sum() string {
+	s := d.h.Sum128()
+	return fmt.Sprintf("%016x%016x", s.Hi, s.Lo)
+}
+
 // Verify returns nil if the digest of path matches expected.
 func Verify(path, expected string) error {
 	got, err := ComputeFile(path)

@@ -59,7 +59,10 @@ func TestParseDuration_Never(t *testing.T) {
 }
 
 func TestParseDuration_Values(t *testing.T) {
-	cases := []struct{ s string; want time.Duration }{
+	cases := []struct {
+		s    string
+		want time.Duration
+	}{
 		{"0s", 0},
 		{"24h", 24 * time.Hour},
 		{"30m", 30 * time.Minute},

@@ -82,9 +82,9 @@ func (c *ChecksumTransform) Reader(src io.Reader) (io.ReadCloser, error) {
 // the checksum transform is only used on NAS/local tiers where large temp
 // files are cheap.
 type checksumWriter struct {
-	dst  io.Writer
-	h    *xxh3.Hasher
-	buf  []byte // simple in-memory buffer — see note below
+	dst io.Writer
+	h   *xxh3.Hasher
+	buf []byte // simple in-memory buffer — see note below
 }
 
 // Write accumulates data, feeding both the hasher and an internal buffer.

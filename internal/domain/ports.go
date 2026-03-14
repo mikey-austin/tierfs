@@ -53,6 +53,15 @@ type Finalizer interface {
 	IsFinal() bool
 }
 
+// Renamer is an optional interface a Backend may implement for atomic rename.
+type Renamer interface {
+	Rename(ctx context.Context, oldRel, newRel string) error
+}
+
+// Utimer is an optional interface a Backend may implement for setting times.
+type Utimer interface {
+	Utimes(relPath string, atime, mtime time.Time) error
+}
 
 // All operations must be safe for concurrent use.
 type MetadataStore interface {
@@ -82,6 +91,9 @@ type MetadataStore interface {
 
 	// FilesAwaitingReplication returns files in StateLocal with no in-flight sync.
 	FilesAwaitingReplication(ctx context.Context) ([]File, error)
+
+	// EvictionCandidates returns synced files on tierName with arrived_at before olderThan.
+	EvictionCandidates(ctx context.Context, tierName string, olderThan time.Time) ([]File, error)
 
 	// Directory listing
 

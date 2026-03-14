@@ -52,10 +52,10 @@ import (
 )
 
 const (
-	defaultPort        = "445"
-	dialTimeout        = 30 * time.Second
+	defaultPort = "445"
+	dialTimeout = 30 * time.Second
 	// maxReconnectDelay between reconnection attempts on fatal transport errors.
-	maxReconnectDelay  = 5 * time.Second
+	maxReconnectDelay = 5 * time.Second
 )
 
 // Config holds the configuration for an SMB backend.
@@ -95,9 +95,9 @@ type parsed struct {
 // Backend is a domain.Backend backed by an SMB2/SMB3 share.
 // All exported methods are safe for concurrent use.
 type Backend struct {
-	cfg    Config
-	p      parsedURI
-	log    *zap.Logger
+	cfg Config
+	p   parsedURI
+	log *zap.Logger
 
 	mu      sync.RWMutex
 	share   *smb2.Share   // nil when not connected

@@ -51,17 +51,17 @@ import (
 	"time"
 
 	"github.com/pkg/sftp"
+	"go.uber.org/zap"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
-	"go.uber.org/zap"
 
 	"github.com/mikey-austin/tierfs/internal/domain"
 )
 
 const (
-	defaultPort       = "22"
-	dialTimeout       = 30 * time.Second
-	reconnectDelay    = 500 * time.Millisecond
+	defaultPort    = "22"
+	dialTimeout    = 30 * time.Second
+	reconnectDelay = 500 * time.Millisecond
 )
 
 // Config holds all configuration for an SFTP backend.
@@ -105,12 +105,12 @@ type Config struct {
 // Backend is a domain.Backend backed by an SFTP server.
 // All exported methods are safe for concurrent use.
 type Backend struct {
-	cfg    Config
-	p      parsedURI
-	log    *zap.Logger
+	cfg Config
+	p   parsedURI
+	log *zap.Logger
 
 	mu     sync.RWMutex
-	client *sftp.Client  // nil when not connected
+	client *sftp.Client // nil when not connected
 	conn   *ssh.Client
 }
 
@@ -122,10 +122,10 @@ func New(cfg Config, log *zap.Logger) (*Backend, error) {
 	}
 
 	// Resolve credentials from env > config > URI.
-	cfg.Username        = resolveStr(cfg.Username, "TIERFS_SFTP_USER", p.uriUsername)
-	cfg.Password        = resolveStr(cfg.Password, "TIERFS_SFTP_PASS", "")
-	cfg.KeyPath         = resolveStr(cfg.KeyPath, "TIERFS_SFTP_KEY_PATH", "")
-	cfg.KeyPassphrase   = resolveStr(cfg.KeyPassphrase, "TIERFS_SFTP_KEY_PASSPHRASE", "")
+	cfg.Username = resolveStr(cfg.Username, "TIERFS_SFTP_USER", p.uriUsername)
+	cfg.Password = resolveStr(cfg.Password, "TIERFS_SFTP_PASS", "")
+	cfg.KeyPath = resolveStr(cfg.KeyPath, "TIERFS_SFTP_KEY_PATH", "")
+	cfg.KeyPassphrase = resolveStr(cfg.KeyPassphrase, "TIERFS_SFTP_KEY_PASSPHRASE", "")
 
 	if cfg.Username == "" {
 		cfg.Username = os.Getenv("USER") // fall back to OS user
@@ -207,7 +207,7 @@ func (b *Backend) Put(ctx context.Context, relPath string, r io.Reader, _ int64)
 		// to be removed first.
 		if err := c.Rename(tmp, dst); err != nil {
 			// Try remove-then-rename for non-POSIX servers.
-			c.Remove(dst)              //nolint:errcheck
+			c.Remove(dst) //nolint:errcheck
 			if rerr := c.Rename(tmp, dst); rerr != nil {
 				c.Remove(tmp) //nolint:errcheck
 				return fmt.Errorf("rename %q → %q: %w", tmp, dst, rerr)
@@ -304,7 +304,7 @@ func (b *Backend) Rename(ctx context.Context, oldRel, newRel string) error {
 		}
 		if err := c.Rename(oldRemote, newRemote); err != nil {
 			// Non-POSIX fallback.
-			c.Remove(newRemote)                         //nolint:errcheck
+			c.Remove(newRemote) //nolint:errcheck
 			if rerr := c.Rename(oldRemote, newRemote); rerr != nil {
 				return fmt.Errorf("rename %q → %q: %w", oldRemote, newRemote, rerr)
 			}
@@ -677,7 +677,7 @@ type parsedURI struct {
 // supply a prefix via Config if needed. However, to stay consistent with
 // the SMB backend's config shape, we split on the first two path components:
 //
-//   sftp://host/mnt/storage/cctv  → basePath="/mnt/storage", prefix="cctv"
+//	sftp://host/mnt/storage/cctv  → basePath="/mnt/storage", prefix="cctv"
 //
 // If only one component is present it becomes basePath with no prefix.
 func parseURI(rawURI string) (parsedURI, error) {

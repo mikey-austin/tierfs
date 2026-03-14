@@ -150,6 +150,13 @@ func (o *ObservableMetaStore) FilesAwaitingReplication(ctx context.Context) ([]d
 	return files, err
 }
 
+func (o *ObservableMetaStore) EvictionCandidates(ctx context.Context, tierName string, olderThan time.Time) ([]domain.File, error) {
+	ctx, done := o.observe(ctx, "EvictionCandidates")
+	files, err := o.inner.EvictionCandidates(ctx, tierName, olderThan)
+	done(err)
+	return files, err
+}
+
 func (o *ObservableMetaStore) ListDir(ctx context.Context, dirPath string) ([]domain.FileInfo, error) {
 	ctx, done := o.observe(ctx, "ListDir")
 	entries, err := o.inner.ListDir(ctx, dirPath)

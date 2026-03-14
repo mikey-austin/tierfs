@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"sort"
 	"time"
 
 	"go.uber.org/zap"
@@ -14,6 +15,7 @@ type EvictorConfig struct {
 	CheckInterval     time.Duration
 	CapacityThreshold float64 // 0-1, evict when tier usage exceeds this
 	CapacityHeadroom  float64 // 0-1, evict down to this watermark
+	TierNames         []string
 }
 
 // TierCapacity reports used/total bytes for a tier.
@@ -21,6 +23,7 @@ type EvictorConfig struct {
 type TierCapacity interface {
 	UsedBytes(ctx context.Context, tierName string) (int64, error)
 	CapacityBytes(tierName string) (int64, bool) // bool = unlimited
+	TierNames() []string
 }
 
 // Evictor runs on a ticker and moves files between tiers according to
@@ -88,28 +91,27 @@ func (e *Evictor) loop() {
 
 func (e *Evictor) tick() {
 	ctx := context.Background()
-	files, err := e.meta.ListFiles(ctx, "")
+	for _, tierName := range e.cfg.TierNames {
+		e.tickTier(ctx, tierName)
+	}
+	e.capacityPass(ctx)
+}
+
+func (e *Evictor) tickTier(ctx context.Context, tierName string) {
+	files, err := e.meta.EvictionCandidates(ctx, tierName, time.Now())
 	if err != nil {
-		e.log.Error("list files for eviction", zap.Error(err))
+		e.log.Error("eviction candidates", zap.String("tier", tierName), zap.Error(err))
 		return
 	}
 
 	for _, f := range files {
-		// Only evict files that are confirmed on at least one other tier.
-		if f.State != domain.StateSynced {
-			continue
-		}
-
 		rule, err := e.policy.Match(f.RelPath)
 		if err != nil {
-			continue // no rule: leave alone
+			continue
 		}
-
-		// Pin tier: never auto-evict.
 		if rule.PinTier == f.CurrentTier {
 			continue
 		}
-
 		e.evaluateSchedule(ctx, f, rule)
 	}
 }
@@ -229,4 +231,109 @@ func (e *Evictor) PromoteForRead(f domain.File, targetTier string) {
 	// Update CurrentTier optimistically so subsequent reads hit the warm tier.
 	// The actual file won't be there until the copy completes, so the FUSE
 	// open path must handle missing local files gracefully by falling back.
+}
+
+func (e *Evictor) capacityPass(ctx context.Context) {
+	for _, tierName := range e.capacity.TierNames() {
+		capBytes, unlimited := e.capacity.CapacityBytes(tierName)
+		if unlimited || capBytes <= 0 {
+			continue
+		}
+
+		usedBytes, err := e.capacity.UsedBytes(ctx, tierName)
+		if err != nil {
+			e.log.Error("capacity check: used bytes", zap.String("tier", tierName), zap.Error(err))
+			continue
+		}
+
+		ratio := float64(usedBytes) / float64(capBytes)
+		if ratio <= e.cfg.CapacityThreshold {
+			continue
+		}
+
+		e.log.Info("capacity threshold exceeded",
+			zap.String("tier", tierName),
+			zap.Float64("ratio", ratio),
+			zap.Float64("threshold", e.cfg.CapacityThreshold),
+		)
+
+		targetBytes := int64(e.cfg.CapacityHeadroom * float64(capBytes))
+		e.evictForCapacity(ctx, tierName, usedBytes, targetBytes)
+	}
+}
+
+func (e *Evictor) evictForCapacity(ctx context.Context, tierName string, usedBytes, targetBytes int64) {
+	files, err := e.meta.FilesOnTier(ctx, tierName)
+	if err != nil {
+		e.log.Error("capacity eviction: list files", zap.String("tier", tierName), zap.Error(err))
+		return
+	}
+
+	type candidate struct {
+		file       domain.File
+		arrivedAt  time.Time
+		targetTier string
+	}
+	var candidates []candidate
+
+	for _, f := range files {
+		if f.State != domain.StateSynced {
+			continue
+		}
+		rule, err := e.policy.Match(f.RelPath)
+		if err != nil {
+			continue
+		}
+		if rule.PinTier == f.CurrentTier {
+			continue
+		}
+		target := nextTierFromSchedule(rule, f.CurrentTier)
+		if target == "" {
+			continue
+		}
+		verified, err := e.meta.IsTierVerified(ctx, f.RelPath, target)
+		if err != nil || !verified {
+			if err == nil && !verified {
+				e.replicator.Enqueue(CopyJob{
+					RelPath:  f.RelPath,
+					FromTier: f.CurrentTier,
+					ToTier:   target,
+				})
+			}
+			continue
+		}
+		arrivedAt, err := e.meta.TierArrivedAt(ctx, f.RelPath, tierName)
+		if err != nil {
+			continue
+		}
+		candidates = append(candidates, candidate{
+			file:       f,
+			arrivedAt:  arrivedAt,
+			targetTier: target,
+		})
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].arrivedAt.Before(candidates[j].arrivedAt)
+	})
+
+	remaining := usedBytes
+	for _, c := range candidates {
+		if remaining <= targetBytes {
+			break
+		}
+		e.evict(ctx, c.file, c.targetTier)
+		remaining -= c.file.Size
+	}
+}
+
+// nextTierFromSchedule returns the next tier from the evict schedule,
+// ignoring age requirements (for capacity-pressure eviction).
+func nextTierFromSchedule(rule domain.Rule, currentTier string) string {
+	for _, step := range rule.EvictSchedule {
+		if step.ToTier != currentTier {
+			return step.ToTier
+		}
+	}
+	return ""
 }
