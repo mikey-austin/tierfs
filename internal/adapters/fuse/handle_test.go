@@ -13,9 +13,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
 
+	"github.com/mikey-austin/tierfs/internal/adapters/storage/file"
 	"github.com/mikey-austin/tierfs/internal/app"
 	"github.com/mikey-austin/tierfs/internal/domain"
-	"github.com/mikey-austin/tierfs/internal/adapters/storage/file"
 )
 
 // makeHandleTestService builds a TierService for handle tests using a real
@@ -39,7 +39,7 @@ func makeHandleTestService(t *testing.T) (*app.TierService, *memMeta, *file.Back
 		"tier1": mb,
 	}
 
-	svc := app.NewTierService(cfg, meta, backends, log)
+	svc := app.NewTierService(cfg, meta, backends, nil, 0, log)
 	return svc, meta, fb
 }
 
@@ -270,7 +270,7 @@ func TestWriteHandle_PushStageFailure(t *testing.T) {
 		"tier1": failBackend,
 	}
 
-	svc := app.NewTierService(cfg, meta, backends, log)
+	svc := app.NewTierService(cfg, meta, backends, nil, 0, log)
 	ctx := context.Background()
 
 	require.NoError(t, meta.UpsertFile(ctx, domain.File{
@@ -337,7 +337,7 @@ func TestWriteHandle_PushStageSuccess(t *testing.T) {
 		"tier1": remoteBackend,
 	}
 
-	svc := app.NewTierService(cfg, meta, backends, log)
+	svc := app.NewTierService(cfg, meta, backends, nil, 0, log)
 	ctx := context.Background()
 
 	require.NoError(t, meta.UpsertFile(ctx, domain.File{
@@ -494,7 +494,7 @@ func TestWriteHandle_PushStage_ReadsCorrectFile(t *testing.T) {
 		"tier1": captureBackend,
 	}
 
-	svc := app.NewTierService(cfg, meta, backends, log)
+	svc := app.NewTierService(cfg, meta, backends, nil, 0, log)
 	ctx := context.Background()
 
 	require.NoError(t, meta.UpsertFile(ctx, domain.File{

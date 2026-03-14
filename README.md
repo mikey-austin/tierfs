@@ -2,7 +2,7 @@
 
 _Transparent N-tier FUSE storage for media-heavy workloads._
 
-[![Go 1.26](https://img.shields.io/badge/go-1.24-00ADD8?style=flat-square&logo=go)](https://go.dev)
+[![Go 1.26](https://img.shields.io/badge/go-1.26-00ADD8?style=flat-square&logo=go)](https://go.dev)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 [![Go Report Card](https://goreportcard.com/badge/github.com/mikey-austin/tierfs?style=flat-square)](https://goreportcard.com/report/github.com/mikey-austin/tierfs)
 [![pkg.go.dev](https://img.shields.io/badge/pkg.go.dev-reference-007d9c?style=flat-square)](https://pkg.go.dev/github.com/mikey-austin/tierfs)

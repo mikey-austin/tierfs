@@ -17,10 +17,10 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
 
+	"github.com/mikey-austin/tierfs/internal/adapters/storage/file"
 	"github.com/mikey-austin/tierfs/internal/app"
 	"github.com/mikey-austin/tierfs/internal/config"
 	"github.com/mikey-austin/tierfs/internal/domain"
-	"github.com/mikey-austin/tierfs/internal/adapters/storage/file"
 )
 
 // ── In-memory stubs ──────────────────────────────────────────────────────────
@@ -392,7 +392,7 @@ func makeFuseFS(t *testing.T) (*TierFS, *memMeta, *file.Backend, *memBackend, *a
 		"tier1": mb,
 	}
 
-	svc := app.NewTierService(cfg, meta, backends, log)
+	svc := app.NewTierService(cfg, meta, backends, nil, 0, log)
 	stager := app.NewStager(stageDir, log)
 	fs := New(svc, meta, stager, log)
 	return fs, meta, fb, mb, stager

@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -48,16 +49,21 @@ func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) UpsertFile(ctx context.Context, f domain.File) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	parentPath := ""
+	if dir := path.Dir(f.RelPath); dir != "." {
+		parentPath = dir
+	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO files (rel_path, current_tier, state, size, mod_time, digest)
-		VALUES (?, ?, ?, ?, ?, ?)
+		INSERT INTO files (rel_path, parent_path, current_tier, state, size, mod_time, digest)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(rel_path) DO UPDATE SET
+			parent_path  = excluded.parent_path,
 			current_tier = excluded.current_tier,
 			state        = excluded.state,
 			size         = excluded.size,
 			mod_time     = excluded.mod_time,
 			digest       = excluded.digest`,
-		f.RelPath, f.CurrentTier, string(f.State),
+		f.RelPath, parentPath, f.CurrentTier, string(f.State),
 		f.Size, f.ModTime.UnixNano(), f.Digest,
 	)
 	if err != nil {
@@ -234,27 +240,16 @@ func (s *Store) FilesAwaitingReplication(ctx context.Context) ([]domain.File, er
 
 // ListDir returns the immediate children of dirPath by splitting file paths.
 // dirPath="" returns root-level entries.
+//
+// Uses the indexed parent_path column: direct children are an exact match
+// (O(children) via index seek), subdirectory detection uses an index prefix scan.
 func (s *Store) ListDir(ctx context.Context, dirPath string) ([]domain.FileInfo, error) {
-	var prefix string
-	if dirPath == "" {
-		prefix = ""
-	} else {
-		prefix = strings.TrimSuffix(dirPath, "/") + "/"
-	}
+	parentPath := strings.TrimSuffix(dirPath, "/")
 
-	// Pull all paths under prefix (or all paths when prefix is empty).
-	var (
-		rows *sql.Rows
-		err  error
-	)
-	if prefix == "" {
-		rows, err = s.db.QueryContext(ctx, `SELECT rel_path, size, mod_time FROM files`)
-	} else {
-		like := escapeLike(strings.TrimSuffix(prefix, "/")) + "/%"
-		rows, err = s.db.QueryContext(ctx, `
-			SELECT rel_path, size, mod_time FROM files
-			WHERE rel_path LIKE ? ESCAPE '\'`, like)
-	}
+	// Direct child files: parent_path exact match (index seek).
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT rel_path, size, mod_time FROM files
+		WHERE parent_path = ?`, parentPath)
 	if err != nil {
 		return nil, fmt.Errorf("list dir: %w", err)
 	}
@@ -273,38 +268,65 @@ func (s *Store) ListDir(ctx context.Context, dirPath string) ([]domain.FileInfo,
 		if err := rows.Scan(&relPath, &size, &modTimeNano); err != nil {
 			return nil, err
 		}
-		// Strip the prefix to get the relative sub-path.
-		sub := relPath[len(prefix):]
-		// Extract the first path component.
-		idx := strings.IndexByte(sub, '/')
-		var name string
-		var isDir bool
-		if idx < 0 {
-			// Direct child file.
-			name = sub
-			isDir = false
-		} else {
-			// Intermediate directory.
-			name = sub[:idx]
-			isDir = true
-		}
-		if e, ok := seen[name]; ok {
-			if !isDir && modTimeNano > e.modTime.UnixNano() {
-				e.modTime = time.Unix(0, modTimeNano)
-				e.size = size
-			}
-		} else {
-			seen[name] = &entry{
-				size:    size,
-				modTime: time.Unix(0, modTimeNano),
-				isDir:   isDir,
-			}
+		name := path.Base(relPath)
+		seen[name] = &entry{
+			size:    size,
+			modTime: time.Unix(0, modTimeNano),
+			isDir:   false,
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 
+	// Subdirectory detection: find distinct parent_paths one level deeper
+	// (index prefix scan on parent_path).
+	var subRows *sql.Rows
+	if parentPath == "" {
+		subRows, err = s.db.QueryContext(ctx, `
+			SELECT DISTINCT parent_path FROM files
+			WHERE parent_path != ''`)
+	} else {
+		like := escapeLike(parentPath) + "/%"
+		subRows, err = s.db.QueryContext(ctx, `
+			SELECT DISTINCT parent_path FROM files
+			WHERE parent_path LIKE ? ESCAPE '\'`, like)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list dir subdirs: %w", err)
+	}
+	defer subRows.Close()
+
+	for subRows.Next() {
+		var pp string
+		if err := subRows.Scan(&pp); err != nil {
+			return nil, err
+		}
+		// Extract the immediate child directory name.
+		var sub string
+		if parentPath == "" {
+			sub = pp
+		} else {
+			sub = strings.TrimPrefix(pp, parentPath+"/")
+		}
+		name := sub
+		if idx := strings.IndexByte(sub, '/'); idx >= 0 {
+			name = sub[:idx]
+		}
+		if _, ok := seen[name]; !ok {
+			seen[name] = &entry{isDir: true}
+		} else {
+			seen[name].isDir = true
+		}
+	}
+	if err := subRows.Err(); err != nil {
+		return nil, err
+	}
+
+	prefix := parentPath
+	if prefix != "" {
+		prefix += "/"
+	}
 	out := make([]domain.FileInfo, 0, len(seen))
 	for name, e := range seen {
 		out = append(out, domain.FileInfo{

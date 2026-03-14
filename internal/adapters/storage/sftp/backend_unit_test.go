@@ -32,16 +32,16 @@ type mockSFTPClient struct {
 	closed   atomic.Bool
 }
 
-func (m *mockSFTPClient) Open(_ string) (*sftp.File, error)        { return nil, nil }
+func (m *mockSFTPClient) Open(_ string) (*sftp.File, error) { return nil, nil }
 func (m *mockSFTPClient) OpenFile(_ string, _ int) (*sftp.File, error) {
 	return nil, nil
 }
-func (m *mockSFTPClient) Stat(_ string) (os.FileInfo, error)       { return nil, nil }
-func (m *mockSFTPClient) Mkdir(_ string) error                     { return nil }
-func (m *mockSFTPClient) Rename(_, _ string) error                 { return nil }
-func (m *mockSFTPClient) Remove(_ string) error                    { return nil }
-func (m *mockSFTPClient) RemoveDirectory(_ string) error           { return nil }
-func (m *mockSFTPClient) ReadDir(_ string) ([]os.FileInfo, error)  { return nil, nil }
+func (m *mockSFTPClient) Stat(_ string) (os.FileInfo, error)      { return nil, nil }
+func (m *mockSFTPClient) Mkdir(_ string) error                    { return nil }
+func (m *mockSFTPClient) Rename(_, _ string) error                { return nil }
+func (m *mockSFTPClient) Remove(_ string) error                   { return nil }
+func (m *mockSFTPClient) RemoveDirectory(_ string) error          { return nil }
+func (m *mockSFTPClient) ReadDir(_ string) ([]os.FileInfo, error) { return nil, nil }
 func (m *mockSFTPClient) Close() error {
 	m.closed.Store(true)
 	return m.closeErr
@@ -415,9 +415,9 @@ type fakeFileInfo struct {
 	isDir   bool
 }
 
-func (f *fakeFileInfo) Name() string      { return f.name }
-func (f *fakeFileInfo) Size() int64       { return f.size }
-func (f *fakeFileInfo) Mode() fs.FileMode { return 0644 }
+func (f *fakeFileInfo) Name() string       { return f.name }
+func (f *fakeFileInfo) Size() int64        { return f.size }
+func (f *fakeFileInfo) Mode() fs.FileMode  { return 0644 }
 func (f *fakeFileInfo) ModTime() time.Time { return f.modTime }
 func (f *fakeFileInfo) IsDir() bool        { return f.isDir }
 func (f *fakeFileInfo) Sys() any           { return nil }

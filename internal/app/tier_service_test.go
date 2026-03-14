@@ -325,7 +325,7 @@ func makeTierService(t *testing.T) (*app.TierService, *memMeta, map[string]*memB
 	b1 := newMemBackend("tier1")
 	backends := map[string]domain.Backend{"tier0": b0, "tier1": b1}
 	log := zaptest.NewLogger(t)
-	ts := app.NewTierService(cfg, meta, backends, log)
+	ts := app.NewTierService(cfg, meta, backends, nil, 0, log)
 	return ts, meta, map[string]*memBackend{"tier0": b0, "tier1": b1}
 }
 
@@ -481,7 +481,7 @@ func TestTierService_SweepRecoversDrop(t *testing.T) {
 	backends := map[string]domain.Backend{"tier0": b0, "tier1": b1}
 	log := zaptest.NewLogger(t)
 
-	ts := app.NewTierService(cfg, meta, backends, log)
+	ts := app.NewTierService(cfg, meta, backends, nil, 0, log)
 	ts.Start()
 	defer ts.Stop()
 
@@ -562,7 +562,7 @@ func TestTierService_OnRename_FallbackCopyDelete(t *testing.T) {
 	b1 := newMemBackend("tier1")
 	backends := map[string]domain.Backend{"tier0": b0, "tier1": b1}
 	log := zaptest.NewLogger(t)
-	ts := app.NewTierService(cfg, meta, backends, log)
+	ts := app.NewTierService(cfg, meta, backends, nil, 0, log)
 
 	// Seed data on tier0.
 	data := []byte("rename fallback data")
@@ -612,7 +612,7 @@ func TestTierService_OnRename_CopyDeletePutFails(t *testing.T) {
 	b1 := newMemBackend("tier1")
 	backends := map[string]domain.Backend{"tier0": b0, "tier1": b1}
 	log := zaptest.NewLogger(t)
-	ts := app.NewTierService(cfg, meta, backends, log)
+	ts := app.NewTierService(cfg, meta, backends, nil, 0, log)
 
 	data := []byte("put will fail")
 	inner.mu.Lock()

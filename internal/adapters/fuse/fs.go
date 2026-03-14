@@ -20,6 +20,8 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+
+	"golang.org/x/sync/singleflight"
 	"syscall"
 	"time"
 
@@ -42,9 +44,10 @@ type TierFS struct {
 	log               *zap.Logger
 
 	// inodeMap assigns stable inode numbers to relative paths.
-	inodeMu  sync.RWMutex
-	inodeMap map[string]uint64
-	nextIno  atomic.Uint64
+	inodeMu    sync.RWMutex
+	inodeMap   map[string]uint64
+	nextIno    atomic.Uint64
+	stageGroup singleflight.Group
 }
 
 // New creates a TierFS. The returned value should be wrapped with
@@ -291,7 +294,10 @@ func (fs *TierFS) Open(name string, flags uint32, ctx *gofuse.Context) (nodefs.F
 		needStage = true
 	}
 	if needStage {
-		if serr := fs.stage(goCtx, backend, name, stagePath, fileInfo); serr != nil {
+		_, serr, _ := fs.stageGroup.Do(name, func() (interface{}, error) {
+			return nil, fs.stage(goCtx, backend, name, stagePath, fileInfo)
+		})
+		if serr != nil {
 			fs.log.Error("stage remote file", zap.String("name", name), zap.Error(serr))
 			return nil, gofuse.EIO
 		}

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/mikey-austin/tierfs/internal/config"
 	"github.com/mikey-austin/tierfs/internal/digest"
@@ -21,15 +22,18 @@ import (
 // implements TierLookup and TierCapacity for Replicator and Evictor, and
 // exposes the file-level operations used by the FUSE layer.
 type TierService struct {
-	cfg        *config.Resolved
-	meta       domain.MetadataStore
-	backends   map[string]domain.Backend // tier name → wrapped backend
-	replicator *Replicator
-	evictor    *Evictor
-	guard      *WriteGuard
-	log        *zap.Logger
-	sweepStop  chan struct{}
-	sweepDone  chan struct{}
+	cfg          *config.Resolved
+	meta         domain.MetadataStore
+	backends     map[string]domain.Backend // tier name → wrapped backend
+	replicator   *Replicator
+	evictor      *Evictor
+	guard        *WriteGuard
+	log          *zap.Logger
+	sweepStop    chan struct{}
+	sweepDone    chan struct{}
+	stager       *Stager
+	stageTTL     time.Duration
+	promoteGroup singleflight.Group
 }
 
 // NewTierService constructs TierService and registers all backends.
@@ -38,6 +42,8 @@ func NewTierService(
 	cfg *config.Resolved,
 	meta domain.MetadataStore,
 	backends map[string]domain.Backend,
+	stager *Stager,
+	stageTTL time.Duration,
 	log *zap.Logger,
 ) *TierService {
 	ts := &TierService{
@@ -48,14 +54,17 @@ func NewTierService(
 		log:       log.Named("tier-service"),
 		sweepStop: make(chan struct{}),
 		sweepDone: make(chan struct{}),
+		stager:    stager,
+		stageTTL:  stageTTL,
 	}
 
 	replCfg := ReplicatorConfig{
-		Workers:       cfg.Replication.Workers,
-		MaxRetries:    cfg.Replication.MaxRetries,
-		RetryInterval: cfg.Replication.RetryInterval,
-		Verify:        cfg.Replication.Verify,
-		WriteGuard:    ts.guard,
+		Workers:        cfg.Replication.Workers,
+		MaxRetries:     cfg.Replication.MaxRetries,
+		RetryInterval:  cfg.Replication.RetryInterval,
+		Verify:         cfg.Replication.Verify,
+		BackendTimeout: cfg.Replication.BackendTimeout,
+		WriteGuard:     ts.guard,
 	}
 	ts.replicator = NewReplicator(replCfg, meta, ts, log)
 
@@ -219,56 +228,76 @@ func (ts *TierService) PromoteToHot(ctx context.Context, relPath string) (domain
 		return b, localPath, nil
 	}
 
-	// Get source (cold) backend.
-	src, err := ts.BackendFor(f.CurrentTier)
-	if err != nil {
-		return nil, "", fmt.Errorf("promote: resolve source backend %q: %w", f.CurrentTier, err)
+	// Deduplicate concurrent promotes for the same file.
+	type promoteResult struct {
+		backend   domain.Backend
+		localPath string
 	}
+	result, err, _ := ts.promoteGroup.Do(relPath, func() (interface{}, error) {
+		// Re-check after winning the singleflight race — another caller
+		// may have already promoted this file.
+		f2, err2 := ts.meta.GetFile(ctx, relPath)
+		if err2 != nil {
+			return nil, fmt.Errorf("promote: re-check metadata: %w", err2)
+		}
+		if f2.CurrentTier == hotTier.Name {
+			b, berr := ts.BackendFor(hotTier.Name)
+			if berr != nil {
+				return nil, berr
+			}
+			lp, _ := b.LocalPath(relPath)
+			return &promoteResult{backend: b, localPath: lp}, nil
+		}
 
-	// Get destination (hot) backend — must be a file backend with LocalPath.
-	dst, err := ts.BackendFor(hotTier.Name)
-	if err != nil {
-		return nil, "", fmt.Errorf("promote: resolve hot backend %q: %w", hotTier.Name, err)
-	}
+		src, serr := ts.BackendFor(f2.CurrentTier)
+		if serr != nil {
+			return nil, fmt.Errorf("promote: resolve source backend %q: %w", f2.CurrentTier, serr)
+		}
+		dst, derr := ts.BackendFor(hotTier.Name)
+		if derr != nil {
+			return nil, fmt.Errorf("promote: resolve hot backend %q: %w", hotTier.Name, derr)
+		}
 
-	ts.log.Info("promoting file for write",
-		zap.String("path", relPath),
-		zap.String("from", f.CurrentTier),
-		zap.String("to", hotTier.Name),
-	)
+		ts.log.Info("promoting file for write",
+			zap.String("path", relPath),
+			zap.String("from", f2.CurrentTier),
+			zap.String("to", hotTier.Name),
+		)
 
-	// Stream cold → hot.
-	rc, size, err := src.Get(ctx, relPath)
-	if err != nil {
-		return nil, "", fmt.Errorf("promote: read from %q: %w", f.CurrentTier, err)
-	}
-	if perr := dst.Put(ctx, relPath, rc, size); perr != nil {
+		rc, size, gerr := src.Get(ctx, relPath)
+		if gerr != nil {
+			return nil, fmt.Errorf("promote: read from %q: %w", f2.CurrentTier, gerr)
+		}
+		if perr := dst.Put(ctx, relPath, rc, size); perr != nil {
+			rc.Close()
+			return nil, fmt.Errorf("promote: write to %q: %w", hotTier.Name, perr)
+		}
 		rc.Close()
-		return nil, "", fmt.Errorf("promote: write to %q: %w", hotTier.Name, perr)
-	}
-	rc.Close()
 
-	// Update metadata: new tier is tier0 but state goes back to StateWriting
-	// since the FUSE caller is about to modify the content.
-	promoted := *f
-	promoted.CurrentTier = hotTier.Name
-	promoted.State = domain.StateWriting
-	if err := ts.meta.UpsertFile(ctx, promoted); err != nil {
-		return nil, "", fmt.Errorf("promote: update metadata: %w", err)
-	}
+		promoted := *f2
+		promoted.CurrentTier = hotTier.Name
+		promoted.State = domain.StateWriting
+		if uerr := ts.meta.UpsertFile(ctx, promoted); uerr != nil {
+			return nil, fmt.Errorf("promote: update metadata: %w", uerr)
+		}
 
-	// Record the tier0 presence.
-	if err := ts.meta.AddFileTier(ctx, domain.FileTier{
-		RelPath:   relPath,
-		TierName:  hotTier.Name,
-		ArrivedAt: time.Now(),
-		Verified:  false, // will be verified by OnWriteComplete
-	}); err != nil {
-		ts.log.Warn("promote: add file tier record", zap.Error(err))
-	}
+		if aerr := ts.meta.AddFileTier(ctx, domain.FileTier{
+			RelPath:   relPath,
+			TierName:  hotTier.Name,
+			ArrivedAt: time.Now(),
+			Verified:  false,
+		}); aerr != nil {
+			ts.log.Warn("promote: add file tier record", zap.Error(aerr))
+		}
 
-	localPath, _ := dst.LocalPath(relPath)
-	return dst, localPath, nil
+		localPath, _ := dst.LocalPath(relPath)
+		return &promoteResult{backend: dst, localPath: localPath}, nil
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	pr := result.(*promoteResult)
+	return pr.backend, pr.localPath, nil
 }
 
 // It computes the digest, updates metadata, and enqueues replication if needed.
@@ -375,16 +404,20 @@ func (ts *TierService) OnRename(ctx context.Context, oldPath, newPath string) er
 		return err
 	}
 
-	// Phase 1: Rename on every tier. Use copy+delete fallback if needed.
+	// Phase 1: Rename on every tier with rollback on failure.
+	var completed []domain.FileTier
+	var renameErr error
 	for _, ft := range tiers {
 		b, berr := ts.BackendFor(ft.TierName)
 		if berr != nil {
-			return fmt.Errorf("rename: backend %q not found: %w", ft.TierName, berr)
+			renameErr = fmt.Errorf("rename: backend %q not found: %w", ft.TierName, berr)
+			break
 		}
 
 		// Try native rename first.
 		if r, ok := b.(domain.Renamer); ok {
 			if rerr := r.Rename(ctx, oldPath, newPath); rerr == nil {
+				completed = append(completed, ft)
 				continue
 			} else {
 				ts.log.Debug("native rename failed, trying copy+delete",
@@ -395,17 +428,54 @@ func (ts *TierService) OnRename(ctx context.Context, oldPath, newPath string) er
 		// Fallback: copy+delete.
 		rc, size, gerr := b.Get(ctx, oldPath)
 		if gerr != nil {
-			return fmt.Errorf("rename: copy from %q failed: %w", ft.TierName, gerr)
+			renameErr = fmt.Errorf("rename: copy from %q failed: %w", ft.TierName, gerr)
+			break
 		}
 		if perr := b.Put(ctx, newPath, rc, size); perr != nil {
 			rc.Close()
-			return fmt.Errorf("rename: put to %q failed: %w", ft.TierName, perr)
+			renameErr = fmt.Errorf("rename: put to %q failed: %w", ft.TierName, perr)
+			break
 		}
 		rc.Close()
 		if derr := b.Delete(ctx, oldPath); derr != nil && derr != domain.ErrNotExist {
 			ts.log.Warn("rename copy+delete: delete old failed",
 				zap.String("tier", ft.TierName), zap.Error(derr))
 		}
+		completed = append(completed, ft)
+	}
+
+	if renameErr != nil {
+		// Rollback completed renames in reverse order.
+		for i := len(completed) - 1; i >= 0; i-- {
+			ft := completed[i]
+			b, berr := ts.BackendFor(ft.TierName)
+			if berr != nil {
+				ts.log.Error("rename rollback: backend not found",
+					zap.String("tier", ft.TierName), zap.Error(berr))
+				continue
+			}
+			if r, ok := b.(domain.Renamer); ok {
+				if rerr := r.Rename(ctx, newPath, oldPath); rerr == nil {
+					continue
+				}
+			}
+			// Fallback: copy+delete for rollback.
+			rc, size, gerr := b.Get(ctx, newPath)
+			if gerr != nil {
+				ts.log.Error("rename rollback: get from new path failed",
+					zap.String("tier", ft.TierName), zap.Error(gerr))
+				continue
+			}
+			if perr := b.Put(ctx, oldPath, rc, size); perr != nil {
+				rc.Close()
+				ts.log.Error("rename rollback: put to old path failed",
+					zap.String("tier", ft.TierName), zap.Error(perr))
+				continue
+			}
+			rc.Close()
+			_ = b.Delete(ctx, newPath)
+		}
+		return renameErr
 	}
 
 	// Phase 2: All backends succeeded — update metadata.
@@ -435,6 +505,9 @@ func (ts *TierService) sweepLoop() {
 			return
 		case <-ticker.C:
 			ts.requeuePending()
+			if ts.stager != nil && ts.stageTTL > 0 {
+				ts.stager.SweepStagingDir(ts.stageTTL)
+			}
 		}
 	}
 }
@@ -560,4 +633,39 @@ func (s *Stager) IsStale(stagePath string, dgst string, modTime time.Time, size 
 func (s *Stager) CleanStale(stagePath string) {
 	os.Remove(stagePath)
 	os.Remove(s.MetaPath(stagePath))
+}
+
+// SweepStagingDir removes staged files (and their .meta sidecars) that are
+// older than ttl. This prevents the stage directory from growing unbounded.
+func (s *Stager) SweepStagingDir(ttl time.Duration) (removed int) {
+	entries, err := os.ReadDir(s.stageDir)
+	if err != nil {
+		s.log.Warn("sweep staging dir: read dir", zap.Error(err))
+		return 0
+	}
+	cutoff := time.Now().Add(-ttl)
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		// Skip .meta sidecar files; they are cleaned alongside their parent.
+		if filepath.Ext(e.Name()) == ".meta" {
+			continue
+		}
+		info, ierr := e.Info()
+		if ierr != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			stagePath := filepath.Join(s.stageDir, e.Name())
+			s.log.Debug("sweep: removing stale staged file", zap.String("path", stagePath))
+			os.Remove(stagePath)
+			os.Remove(stagePath + ".meta")
+			removed++
+		}
+	}
+	if removed > 0 {
+		s.log.Info("swept stale staged files", zap.Int("removed", removed))
+	}
+	return removed
 }

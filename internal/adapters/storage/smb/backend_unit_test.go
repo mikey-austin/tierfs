@@ -79,8 +79,8 @@ func (f *mockFile) Stat() (os.FileInfo, error) {
 
 // mockShare implements smbShare for unit testing.
 type mockShare struct {
-	files   map[string][]byte // path -> content
-	dirs    map[string]bool   // tracks directories
+	files map[string][]byte // path -> content
+	dirs  map[string]bool   // tracks directories
 
 	// Error injection.
 	openErr     error
@@ -93,10 +93,10 @@ type mockShare struct {
 	umountErr   error
 
 	// Call tracking.
-	mkdirCalls    []string
-	removeCalls   []string
-	renameCalls   [][2]string
-	readDirCalls  []string
+	mkdirCalls   []string
+	removeCalls  []string
+	renameCalls  [][2]string
+	readDirCalls []string
 }
 
 func newMockShare() *mockShare {

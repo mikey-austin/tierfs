@@ -100,6 +100,11 @@ type Config struct {
 	// KnownHostsFile is the path to a known_hosts file. Takes precedence over
 	// HostKey if both are set.
 	KnownHostsFile string
+
+	// InsecureIgnoreHostKey, when true, disables host key verification entirely.
+	// Must be set explicitly in the config file; the default is to refuse connection
+	// if no HostKey or KnownHostsFile is provided.
+	InsecureIgnoreHostKey bool
 }
 
 // sftpClient abstracts the subset of *sftp.Client that Backend uses.
@@ -521,10 +526,13 @@ func (b *Backend) hostKeyCallback() (ssh.HostKeyCallback, error) {
 		}
 		return ssh.FixedHostKey(pk), nil
 	}
-	b.log.Warn("host key verification disabled (InsecureIgnoreHostKey) — set host_key in config for production",
-		zap.String("host", b.p.hostPort),
-	)
-	return ssh.InsecureIgnoreHostKey(), nil //nolint:gosec
+	if b.cfg.InsecureIgnoreHostKey {
+		b.log.Warn("host key verification disabled (InsecureIgnoreHostKey) — set host_key in config for production",
+			zap.String("host", b.p.hostPort),
+		)
+		return ssh.InsecureIgnoreHostKey(), nil //nolint:gosec
+	}
+	return nil, fmt.Errorf("host key verification is required: set sftp_host_key, sftp_known_hosts_file, or sftp_insecure_ignore_host_key = true")
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

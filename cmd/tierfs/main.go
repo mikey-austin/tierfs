@@ -95,8 +95,16 @@ func run(cfgPath string) error {
 	}
 
 	// ── Application layer ─────────────────────────────────────────────────────
-	svc := app.NewTierService(cfg, meta, backends, log)
+	stageTTL := 24 * time.Hour
+	if cfg.Mount.StageTTL != "" {
+		d, derr := time.ParseDuration(cfg.Mount.StageTTL)
+		if derr != nil {
+			return fmt.Errorf("parse stage_ttl: %w", derr)
+		}
+		stageTTL = d
+	}
 	stager := app.NewStager(cfg.Mount.StageDir, log)
+	svc := app.NewTierService(cfg, meta, backends, stager, stageTTL, log)
 	svc.Start()
 	defer svc.Stop()
 
@@ -165,14 +173,15 @@ func buildBackend(cfg config.BackendConfig, log *zap.Logger) (domain.Backend, er
 		})
 	case "sftp":
 		return sftpbackend.New(sftpbackend.Config{
-			Name:           cfg.Name,
-			URI:            cfg.URI,
-			Username:       cfg.SFTPUsername,
-			Password:       cfg.SFTPPassword,
-			KeyPath:        cfg.SFTPKeyPath,
-			KeyPassphrase:  cfg.SFTPKeyPassphrase,
-			HostKey:        cfg.SFTPHostKey,
-			KnownHostsFile: cfg.SFTPKnownHostsFile,
+			Name:                  cfg.Name,
+			URI:                   cfg.URI,
+			Username:              cfg.SFTPUsername,
+			Password:              cfg.SFTPPassword,
+			KeyPath:               cfg.SFTPKeyPath,
+			KeyPassphrase:         cfg.SFTPKeyPassphrase,
+			HostKey:               cfg.SFTPHostKey,
+			KnownHostsFile:        cfg.SFTPKnownHostsFile,
+			InsecureIgnoreHostKey: cfg.SFTPInsecureIgnoreHostKey,
 		}, log)
 	case "smb":
 		return smbbackend.New(smbbackend.Config{

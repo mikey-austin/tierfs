@@ -491,14 +491,14 @@ func TestEvictionCandidates_UnderLoad(t *testing.T) {
 	ctx := context.Background()
 
 	const (
-		totalFiles    = 5000
-		oldFileCount  = 2500 // files with arrived_at before cutoff
-		tierName      = "tier0"
+		totalFiles   = 5000
+		oldFileCount = 2500 // files with arrived_at before cutoff
+		tierName     = "tier0"
 	)
 
 	cutoff := time.Now().Add(-24 * time.Hour)
-	oldTime := cutoff.Add(-48 * time.Hour)  // 48 hours before cutoff
-	newTime := cutoff.Add(48 * time.Hour)   // 48 hours after cutoff
+	oldTime := cutoff.Add(-48 * time.Hour) // 48 hours before cutoff
+	newTime := cutoff.Add(48 * time.Hour)  // 48 hours after cutoff
 
 	// Insert 5,000 synced files with associated file_tiers entries.
 	for i := 0; i < totalFiles; i++ {

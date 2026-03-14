@@ -11,6 +11,7 @@ PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS files (
     rel_path     TEXT    NOT NULL PRIMARY KEY,
+    parent_path  TEXT    NOT NULL DEFAULT '',
     current_tier TEXT    NOT NULL,
     state        TEXT    NOT NULL DEFAULT 'local',
     size         INTEGER NOT NULL DEFAULT 0,
@@ -29,6 +30,7 @@ CREATE TABLE IF NOT EXISTS file_tiers (
 
 CREATE INDEX IF NOT EXISTS idx_files_state        ON files(state);
 CREATE INDEX IF NOT EXISTS idx_files_current_tier ON files(current_tier);
+CREATE INDEX IF NOT EXISTS idx_files_parent_path  ON files(parent_path);
 CREATE INDEX IF NOT EXISTS idx_file_tiers_tier    ON file_tiers(tier_name);
 CREATE INDEX IF NOT EXISTS idx_file_tiers_arrived ON file_tiers(tier_name, arrived_at);
 `

@@ -27,11 +27,12 @@ type CopyJob struct {
 
 // ReplicatorConfig holds settings for the replication worker pool.
 type ReplicatorConfig struct {
-	Workers       int
-	MaxRetries    int
-	RetryInterval time.Duration
-	Verify        string      // "none" | "size" | "digest"
-	WriteGuard    *WriteGuard // nil = no guard (for tests that don't need it)
+	Workers        int
+	MaxRetries     int
+	RetryInterval  time.Duration
+	Verify         string        // "none" | "size" | "digest"
+	BackendTimeout time.Duration // max time for a single replication operation
+	WriteGuard     *WriteGuard   // nil = no guard (for tests that don't need it)
 }
 
 // TierLookup resolves a tier name to its Backend. Implemented by TierService.
@@ -123,13 +124,16 @@ func (r *Replicator) worker(id int) {
 						zap.Int("retry", job.Retries),
 						zap.Error(err),
 					)
-					go func(j CopyJob) {
-						select {
-						case <-r.stop:
-						case <-time.After(r.cfg.RetryInterval):
-							r.Enqueue(j)
-						}
-					}(job)
+					// Inline retry delay instead of spawning a goroutine
+					// to prevent unbounded goroutine growth under high failure rates.
+					retryTimer := time.NewTimer(r.cfg.RetryInterval)
+					select {
+					case <-r.stop:
+						retryTimer.Stop()
+						return
+					case <-retryTimer.C:
+						r.Enqueue(job)
+					}
 				} else {
 					log.Error("copy permanently failed after max retries",
 						zap.String("rel_path", job.RelPath),
@@ -144,7 +148,8 @@ func (r *Replicator) worker(id int) {
 }
 
 func (r *Replicator) process(log *zap.Logger, job CopyJob) error {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), r.cfg.BackendTimeout)
+	defer cancel()
 
 	// ── Write-guard check ────────────────────────────────────────────────────
 	// Refuse to start the copy if the source file has an open write handle or
@@ -158,13 +163,14 @@ func (r *Replicator) process(log *zap.Logger, job CopyJob) error {
 			)
 			// Re-enqueue with a short delay. This uses the normal retry path
 			// but does NOT consume a retry count — it's not an error.
-			go func() {
-				select {
-				case <-r.stop:
-				case <-time.After(r.cfg.RetryInterval):
-					r.Enqueue(job) // job.Retries unchanged
-				}
-			}()
+			// Inline to avoid unbounded goroutine growth.
+			retryTimer := time.NewTimer(r.cfg.RetryInterval)
+			select {
+			case <-r.stop:
+				retryTimer.Stop()
+			case <-retryTimer.C:
+				r.Enqueue(job) // job.Retries unchanged
+			}
 			return nil
 		}
 	}

@@ -86,11 +86,11 @@ type shareAdapter struct {
 func (a *shareAdapter) OpenFile(name string, flag int, perm os.FileMode) (smbFile, error) {
 	return a.s.OpenFile(name, flag, perm)
 }
-func (a *shareAdapter) Open(name string) (smbFile, error) { return a.s.Open(name) }
-func (a *shareAdapter) Stat(name string) (os.FileInfo, error)     { return a.s.Stat(name) }
-func (a *shareAdapter) Remove(name string) error                  { return a.s.Remove(name) }
-func (a *shareAdapter) Rename(oldpath, newpath string) error      { return a.s.Rename(oldpath, newpath) }
-func (a *shareAdapter) Mkdir(name string, perm os.FileMode) error { return a.s.Mkdir(name, perm) }
+func (a *shareAdapter) Open(name string) (smbFile, error)          { return a.s.Open(name) }
+func (a *shareAdapter) Stat(name string) (os.FileInfo, error)      { return a.s.Stat(name) }
+func (a *shareAdapter) Remove(name string) error                   { return a.s.Remove(name) }
+func (a *shareAdapter) Rename(oldpath, newpath string) error       { return a.s.Rename(oldpath, newpath) }
+func (a *shareAdapter) Mkdir(name string, perm os.FileMode) error  { return a.s.Mkdir(name, perm) }
 func (a *shareAdapter) ReadDir(name string) ([]os.FileInfo, error) { return a.s.ReadDir(name) }
 func (a *shareAdapter) Umount() error                              { return a.s.Umount() }
 
@@ -149,9 +149,9 @@ type Backend struct {
 // Only available within the smb package (tests use package smb, not smb_test).
 func newForTest(share smbShare, prefix string, log *zap.Logger) *Backend {
 	b := &Backend{
-		cfg: Config{Name: "test"},
-		p:   parsedURI{prefix: prefix},
-		log: log,
+		cfg:   Config{Name: "test"},
+		p:     parsedURI{prefix: prefix},
+		log:   log,
 		share: share,
 	}
 	b.connectFn = func() error { return nil }

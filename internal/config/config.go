@@ -29,6 +29,7 @@ type MountConfig struct {
 	EntryTimeout    string `toml:"entry_timeout"`
 	AttrTimeout     string `toml:"attr_timeout"`
 	NegativeTimeout string `toml:"negative_timeout"`
+	StageTTL        string `toml:"stage_ttl"` // max age of staged files before cleanup; default "24h"
 }
 
 type ReplicationConfig struct {
@@ -38,6 +39,7 @@ type ReplicationConfig struct {
 	Verify          string `toml:"verify"`           // none | size | digest
 	WriteQuiescence string `toml:"write_quiescence"` // min idle time after last write close before replication
 	SweepInterval   string `toml:"sweep_interval"`   // how often to re-enqueue StateLocal files
+	BackendTimeout  string `toml:"backend_timeout"`  // max time for a single replication backend call
 }
 
 type EvictionConfig struct {
@@ -60,12 +62,13 @@ type BackendConfig struct {
 	SMBDomain            string `toml:"smb_domain"`             // Windows/AD domain; empty for workgroup NAS
 	SMBRequireEncryption bool   `toml:"smb_require_encryption"` // require SMB3 encryption
 	// SFTP-specific fields (only for sftp:// URIs)
-	SFTPUsername       string `toml:"sftp_username"`         // prefer TIERFS_SFTP_USER env var
-	SFTPPassword       string `toml:"sftp_password"`         // prefer TIERFS_SFTP_PASS env var
-	SFTPKeyPath        string `toml:"sftp_key_path"`         // path to PEM private key; prefer TIERFS_SFTP_KEY_PATH
-	SFTPKeyPassphrase  string `toml:"sftp_key_passphrase"`   // decrypts encrypted key; prefer TIERFS_SFTP_KEY_PASSPHRASE
-	SFTPHostKey        string `toml:"sftp_host_key"`         // expected host key in authorized_keys format
-	SFTPKnownHostsFile string `toml:"sftp_known_hosts_file"` // path to known_hosts file
+	SFTPUsername              string `toml:"sftp_username"`                 // prefer TIERFS_SFTP_USER env var
+	SFTPPassword              string `toml:"sftp_password"`                 // prefer TIERFS_SFTP_PASS env var
+	SFTPKeyPath               string `toml:"sftp_key_path"`                 // path to PEM private key; prefer TIERFS_SFTP_KEY_PATH
+	SFTPKeyPassphrase         string `toml:"sftp_key_passphrase"`           // decrypts encrypted key; prefer TIERFS_SFTP_KEY_PASSPHRASE
+	SFTPHostKey               string `toml:"sftp_host_key"`                 // expected host key in authorized_keys format
+	SFTPKnownHostsFile        string `toml:"sftp_known_hosts_file"`         // path to known_hosts file
+	SFTPInsecureIgnoreHostKey bool   `toml:"sftp_insecure_ignore_host_key"` // must be set explicitly to skip host key verification
 	// Transform applies compression and/or encryption to data at rest.
 	// Compression is always applied before encryption on the write path.
 	Transform BackendTransformConfig `toml:"transform"`
@@ -186,6 +189,7 @@ type ReplicationResolved struct {
 	Verify          string
 	WriteQuiescence time.Duration
 	SweepInterval   time.Duration
+	BackendTimeout  time.Duration
 }
 
 type EvictionResolved struct {
@@ -380,6 +384,15 @@ func (cfg *Config) resolveReplication() (ReplicationResolved, error) {
 		}
 		sweepInterval = d
 	}
+	backendTimeout := 10 * time.Minute
+	if rc.BackendTimeout != "" {
+		d, err := time.ParseDuration(rc.BackendTimeout)
+		if err != nil {
+			return ReplicationResolved{}, fmt.Errorf("replication.backend_timeout: %w", err)
+		}
+		backendTimeout = d
+	}
+
 	return ReplicationResolved{
 		Workers:         workers,
 		RetryInterval:   retryInterval,
@@ -387,6 +400,7 @@ func (cfg *Config) resolveReplication() (ReplicationResolved, error) {
 		Verify:          verify,
 		WriteQuiescence: writeQuiescence,
 		SweepInterval:   sweepInterval,
+		BackendTimeout:  backendTimeout,
 	}, nil
 }
 

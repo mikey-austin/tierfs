@@ -120,7 +120,7 @@ promote_on_read = false
 	log := zaptest.NewLogger(t)
 	backends := map[string]domain.Backend{"tier0": b0, "tier1": b1}
 
-	svc := app.NewTierService(cfg, meta, backends, log)
+	svc := app.NewTierService(cfg, meta, backends, nil, 0, log)
 	svc.Start()
 	t.Cleanup(svc.Stop)
 
@@ -225,7 +225,7 @@ promote_on_read = false
 
 	backends := map[string]domain.Backend{"tier0": b0, "tier1": b1Wrapped}
 
-	svc := app.NewTierService(cfg, meta, backends, log)
+	svc := app.NewTierService(cfg, meta, backends, nil, 0, log)
 	svc.Start()
 	t.Cleanup(svc.Stop)
 

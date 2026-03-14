@@ -301,7 +301,7 @@ func newTierServiceForPromotion(t *testing.T) (*app.TierService, *memMeta, map[s
 	b1 := newMemBackend("tier1")
 	backends := map[string]domain.Backend{"tier0": b0, "tier1": b1}
 	log := zaptest.NewLogger(t)
-	ts := app.NewTierService(cfg, meta, backends, log)
+	ts := app.NewTierService(cfg, meta, backends, nil, 0, log)
 	return ts, meta, map[string]*memBackend{"tier0": b0, "tier1": b1}
 }
 
@@ -417,7 +417,7 @@ func TestPromoteToHot_SourceReadFailure(t *testing.T) {
 	b0 := newMemBackend("tier0")
 	backends := map[string]domain.Backend{"tier0": b0, "tier1": badSrc}
 	log := zaptest.NewLogger(t)
-	ts := app.NewTierService(cfg, meta, backends, log)
+	ts := app.NewTierService(cfg, meta, backends, nil, 0, log)
 
 	require.NoError(t, meta.UpsertFile(ctx, domain.File{
 		RelPath:     "recordings/fail.mp4",
