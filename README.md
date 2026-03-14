@@ -13,21 +13,23 @@ It was built for surveillance and media workloads where data arrives at high vol
 
 ## Features
 
-| Feature | Detail |
-|---|---|
-| **Transparent FUSE mount** | Applications see a single path; all tiering is invisible |
-| **N-tier policy engine** | Unlimited tiers with per-rule TOML eviction schedules |
-| **5 backend types** | `file://` (local/NFS), `s3://` (MinIO, Ceph, AWS, B2), `sftp://`, `smb://`, `null://` (discard) |
-| **Transform pipeline** | Pluggable compression (gzip, zstd) and AES-256-GCM encryption; ordering enforced automatically |
-| **Digest verification** | xxhash3-128 (>30 GB/s with SIMD) confirms copy integrity |
-| **Async replication** | Configurable worker pool with retry and write-quiescence guard; writes never block |
-| **Capacity pressure eviction** | Threshold/headroom watermarks trigger oldest-first eviction |
-| **Promote on read** | Cold files pulled back to hot tier transparently on access |
-| **Pin tier** | Named files or directories exempted from auto-eviction |
-| **Write guard** | Configurable quiescence window prevents replication of in-progress multi-phase writes |
-| **Structured observability** | 22 Prometheus metrics, OpenTelemetry tracing, zap JSON logs with rotation |
-| **Admin UI** | React SPA for monitoring tier status, replication, and eviction activity |
-| **Hexagonal architecture** | Domain ports; adapters injected at startup; fully testable |
+| Feature                        | Detail                                                                                          |
+|--------------------------------|-------------------------------------------------------------------------------------------------|
+| **Transparent FUSE mount**     | Applications see a single path; all tiering is invisible                                        |
+| **N-tier policy engine**       | Unlimited tiers with per-rule TOML eviction schedules                                           |
+| **5 backend types**            | `file://` (local/NFS), `s3://` (MinIO, Ceph, AWS, B2), `sftp://`, `smb://`, `null://` (discard) |
+| **Transform pipeline**         | Pluggable compression (gzip, zstd) and AES-256-GCM encryption; ordering enforced automatically  |
+| **Digest verification**        | xxhash3-128 (>30 GB/s with SIMD) confirms copy integrity                                        |
+| **Async replication**          | Configurable worker pool with retry and write-quiescence guard; writes never block              |
+| **Capacity pressure eviction** | Threshold/headroom watermarks trigger oldest-first eviction                                     |
+| **Promote on read**            | Cold files pulled back to hot tier transparently on access                                      |
+| **Pin tier**                   | Named files or directories exempted from auto-eviction                                          |
+| **Write guard**                | Configurable quiescence window prevents replication of in-progress multi-phase writes           |
+| **Structured observability**   | 22 Prometheus metrics, OpenTelemetry tracing, zap JSON logs with rotation                       |
+| **Admin UI**                   | React SPA for monitoring tier status, replication, and eviction activity                        |
+| **Hexagonal architecture**     | Domain ports; adapters injected at startup; fully testable                                      |
+
+![Dashboard](./docs/dashboard.png "Admin Dashboard")
 
 ## How It Works
 
