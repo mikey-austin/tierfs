@@ -1056,6 +1056,101 @@ func TestUnlink_CleansStage(t *testing.T) {
 	assert.True(t, os.IsNotExist(err), "staged file should be removed after unlink")
 }
 
+// ── StatFs tests ─────────────────────────────────────────────────────────────
+
+func TestStatFs_ReturnsNonNil(t *testing.T) {
+	fs, _, _, _, _ := makeFuseFS(t)
+
+	out := fs.StatFs("")
+	require.NotNil(t, out, "StatFs should return stats for the hot tier")
+	assert.NotZero(t, out.Blocks, "should report non-zero total blocks")
+	assert.NotZero(t, out.Bfree, "should report non-zero free blocks")
+	assert.NotZero(t, out.Bavail, "should report non-zero available blocks")
+	assert.NotZero(t, out.Bsize, "should report non-zero block size")
+}
+
+func TestStatFs_NamedPath(t *testing.T) {
+	fs, meta, fb, _, _ := makeFuseFS(t)
+	seedFile(t, fs, meta, fb, "recordings/stat.mp4", []byte("data"))
+
+	// StatFs with a named path should still work (returns hot tier stats).
+	out := fs.StatFs("recordings/stat.mp4")
+	require.NotNil(t, out)
+	assert.NotZero(t, out.Blocks)
+}
+
+// ── GetAttr hot-tier fallback tests ──────────────────────────────────────────
+
+func TestGetAttr_HotTierFallback(t *testing.T) {
+	fs, _, fb, _, _ := makeFuseFS(t)
+
+	// Write a file directly to the hot tier backend WITHOUT recording metadata.
+	// This simulates the race where Release/OnWriteComplete hasn't finished yet.
+	ctx := context.Background()
+	data := []byte("file exists on disk but not in metadata")
+	err := fb.Put(ctx, "recordings/race.mp4", bytes.NewReader(data), int64(len(data)))
+	require.NoError(t, err)
+
+	// GetAttr should find the file via the hot-tier fallback.
+	attr, status := fs.GetAttr("recordings/race.mp4", nil)
+	require.Equal(t, gofuse.OK, status, "should find file via hot-tier fallback")
+	assert.Equal(t, uint32(gofuse.S_IFREG|0o644), attr.Mode)
+	assert.Equal(t, uint64(len(data)), attr.Size)
+}
+
+// ── Open hot-tier fallback tests ─────────────────────────────────────────────
+
+func TestOpen_HotTierFallback(t *testing.T) {
+	fs, _, fb, _, _ := makeFuseFS(t)
+
+	// Write a file directly to the hot tier backend WITHOUT recording metadata.
+	ctx := context.Background()
+	data := []byte("on disk but not in meta")
+	err := fb.Put(ctx, "recordings/race-open.mp4", bytes.NewReader(data), int64(len(data)))
+	require.NoError(t, err)
+
+	// Open for reading should succeed via the hot-tier fallback.
+	fh, status := fs.Open("recordings/race-open.mp4", uint32(os.O_RDONLY), nil)
+	require.Equal(t, gofuse.OK, status, "should open file via hot-tier fallback")
+	require.NotNil(t, fh)
+
+	buf := make([]byte, 100)
+	rr, rs := fh.Read(buf, 0)
+	require.Equal(t, gofuse.OK, rs)
+	got, _ := rr.Bytes(buf)
+	assert.Equal(t, data, got)
+
+	fh.Release()
+}
+
+func TestOpen_HotTierFallback_WriteFlags(t *testing.T) {
+	fs, meta, fb, _, _ := makeFuseFS(t)
+
+	// Simulate the faststart race: file exists on disk AND in metadata
+	// (from Create), but ReadTarget fails because OnWriteComplete is
+	// updating the record. In practice, the metadata row exists from
+	// Create so PromoteToHot succeeds — this test verifies that path.
+	ctx := context.Background()
+	data := []byte("writable race file")
+	err := fb.Put(ctx, "recordings/race-write.mp4", bytes.NewReader(data), int64(len(data)))
+	require.NoError(t, err)
+
+	// Record metadata (as Create would have done).
+	require.NoError(t, meta.UpsertFile(ctx, domain.File{
+		RelPath:     "recordings/race-write.mp4",
+		CurrentTier: "tier0",
+		State:       domain.StateWriting,
+		Size:        int64(len(data)),
+		ModTime:     time.Now(),
+	}))
+
+	// Open for writing should succeed — file is already on hot tier.
+	fh, status := fs.Open("recordings/race-write.mp4", 2, nil) // O_RDWR
+	require.Equal(t, gofuse.OK, status, "should open for write when file is on hot tier")
+	require.NotNil(t, fh)
+	fh.Release()
+}
+
 // ── Rename preserves file content ────────────────────────────────────────────
 
 func TestRename_PreservesContent(t *testing.T) {

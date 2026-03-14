@@ -445,6 +445,35 @@ func (fs *TierFS) Utimens(name string, atime *time.Time, mtime *time.Time, ctx *
 	return gofuse.OK
 }
 
+// StatFs reports filesystem capacity. Returns the hot tier's underlying
+// filesystem stats so that callers like Frigate's storage_maintainer can
+// check free space with shutil.disk_usage / statvfs.
+func (fs *TierFS) StatFs(name string) *gofuse.StatfsOut {
+	hotBackend, err := fs.svc.BackendFor(fs.svc.HottestTierName())
+	if err != nil {
+		return nil
+	}
+	// Use the backend's root directory for statvfs.
+	localPath, ok := hotBackend.LocalPath("")
+	if !ok {
+		return nil
+	}
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(localPath, &st); err != nil {
+		return nil
+	}
+	out := &gofuse.StatfsOut{}
+	out.Blocks = st.Blocks
+	out.Bfree = st.Bfree
+	out.Bavail = st.Bavail
+	out.Files = st.Files
+	out.Ffree = st.Ffree
+	out.Bsize = uint32(st.Bsize)
+	out.NameLen = uint32(st.Namelen)
+	out.Frsize = uint32(st.Frsize)
+	return out
+}
+
 // Truncate sets a file's size. Routes through the post-write path to
 // recompute the digest, reset state to local, and enqueue replication.
 func (fs *TierFS) Truncate(name string, size uint64, ctx *gofuse.Context) gofuse.Status {
