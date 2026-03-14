@@ -276,9 +276,9 @@ func (cfg *Config) Resolve() (*Resolved, error) {
 			return nil, fmt.Errorf("backend %q: invalid uri %q: %w", b.Name, b.URI, err)
 		}
 		switch u.Scheme {
-		case "file", "s3":
+		case "file", "s3", "sftp", "smb", "null":
 		default:
-			return nil, fmt.Errorf("backend %q: unsupported scheme %q (supported: file, s3)", b.Name, u.Scheme)
+			return nil, fmt.Errorf("backend %q: unsupported scheme %q (supported: file, s3, sftp, smb, null)", b.Name, u.Scheme)
 		}
 		if _, exists := backendMap[b.Name]; exists {
 			return nil, fmt.Errorf("duplicate backend name %q", b.Name)
