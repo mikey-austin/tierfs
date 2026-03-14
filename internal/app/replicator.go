@@ -15,6 +15,7 @@ import (
 
 	"github.com/mikey-austin/tierfs/internal/digest"
 	"github.com/mikey-austin/tierfs/internal/domain"
+	"github.com/mikey-austin/tierfs/internal/observability/metrics"
 )
 
 // CopyJob describes a single file replication operation between two tiers.
@@ -60,6 +61,9 @@ type Replicator struct {
 	// Pending jobs shadow tracking for admin API.
 	pendingMu   sync.Mutex
 	pendingJobs map[string]*CopyJob
+
+	// Prometheus metrics registry (nil-safe; nil in tests).
+	reg *metrics.Registry
 }
 
 // NewReplicator creates a Replicator. Call Start() to begin processing.
@@ -73,6 +77,11 @@ func NewReplicator(cfg ReplicatorConfig, meta domain.MetadataStore, tiers TierLo
 		stop:        make(chan struct{}),
 		pendingJobs: make(map[string]*CopyJob),
 	}
+}
+
+// SetRegistry wires Prometheus metrics. Call before Start().
+func (r *Replicator) SetRegistry(reg *metrics.Registry) {
+	r.reg = reg
 }
 
 // Start launches the worker pool.
@@ -97,7 +106,10 @@ func (r *Replicator) Enqueue(job CopyJob) {
 	}
 	select {
 	case r.queue <- job:
-		r.queueDepth.Add(1)
+		depth := r.queueDepth.Add(1)
+		if r.reg != nil {
+			r.reg.ReplicationQueueDepth.Set(float64(depth))
+		}
 		r.pendingMu.Lock()
 		jc := job // copy
 		r.pendingJobs[job.RelPath] = &jc
@@ -138,9 +150,16 @@ func (r *Replicator) worker(id int) {
 			if !ok {
 				return
 			}
-			r.queueDepth.Add(-1)
+			depth := r.queueDepth.Add(-1)
+			if r.reg != nil {
+				r.reg.ReplicationQueueDepth.Set(float64(depth))
+			}
+			processStart := time.Now()
 			if err := r.process(log, job); err != nil {
 				r.totalFailed.Add(1)
+				if r.reg != nil {
+					r.reg.ReplicationTotal.WithLabelValues(job.FromTier, job.ToTier, "error").Inc()
+				}
 				if job.Retries < r.cfg.MaxRetries {
 					job.Retries++
 					log.Warn("copy failed, scheduling retry",
@@ -167,6 +186,11 @@ func (r *Replicator) worker(id int) {
 				}
 			} else {
 				r.totalCopied.Add(1)
+				if r.reg != nil {
+					dur := time.Since(processStart).Seconds()
+					r.reg.ReplicationTotal.WithLabelValues(job.FromTier, job.ToTier, "ok").Inc()
+					r.reg.ReplicationDuration.WithLabelValues(job.FromTier, job.ToTier).Observe(dur)
+				}
 				r.pendingMu.Lock()
 				delete(r.pendingJobs, job.RelPath)
 				r.pendingMu.Unlock()
@@ -285,6 +309,9 @@ func (r *Replicator) process(log *zap.Logger, job CopyJob) error {
 		return fmt.Errorf("write to dest: %w", err)
 	}
 	rc.Close()
+	if r.reg != nil && size > 0 {
+		r.reg.ReplicationBytes.WithLabelValues(job.FromTier, job.ToTier).Add(float64(size))
+	}
 
 	// Verification.
 	switch r.cfg.Verify {

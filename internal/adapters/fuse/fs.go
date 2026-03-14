@@ -32,6 +32,7 @@ import (
 
 	"github.com/mikey-austin/tierfs/internal/app"
 	"github.com/mikey-austin/tierfs/internal/domain"
+	"github.com/mikey-austin/tierfs/internal/observability/metrics"
 )
 
 // TierFS implements pathfs.FileSystem, the higher-level go-fuse interface.
@@ -42,6 +43,7 @@ type TierFS struct {
 	meta              domain.MetadataStore
 	stager            *app.Stager
 	log               *zap.Logger
+	reg               *metrics.Registry
 
 	// inodeMap assigns stable inode numbers to relative paths.
 	inodeMu    sync.RWMutex
@@ -62,13 +64,14 @@ type TierFS struct {
 
 // New creates a TierFS. The returned value should be wrapped with
 // pathfs.NewPathNodeFs and mounted via fuse.NewServer.
-func New(svc *app.TierService, meta domain.MetadataStore, stager *app.Stager, log *zap.Logger) *TierFS {
+func New(svc *app.TierService, meta domain.MetadataStore, stager *app.Stager, log *zap.Logger, reg *metrics.Registry) *TierFS {
 	fs := &TierFS{
 		FileSystem: pathfs.NewDefaultFileSystem(),
 		svc:        svc,
 		meta:       meta,
 		stager:     stager,
 		log:        log.Named("fuse"),
+		reg:        reg,
 		inodeMap:   make(map[string]uint64),
 	}
 	fs.nextIno.Store(2) // 1 is reserved for root
@@ -78,10 +81,25 @@ func New(svc *app.TierService, meta domain.MetadataStore, stager *app.Stager, lo
 	return fs
 }
 
+// fuseOp records a FUSE operation's outcome and duration in Prometheus metrics.
+func (fs *TierFS) fuseOp(op string, status gofuse.Status, start time.Time) {
+	if fs.reg == nil {
+		return
+	}
+	outcome := "ok"
+	if status != gofuse.OK {
+		outcome = "error"
+	}
+	fs.reg.FuseOps.WithLabelValues(op, outcome).Inc()
+	fs.reg.FuseDuration.WithLabelValues(op).Observe(time.Since(start).Seconds())
+}
+
 // ── Directory operations ──────────────────────────────────────────────────────
 
 // GetAttr implements stat(2). Directories are synthetic; files come from metadata.
-func (fs *TierFS) GetAttr(name string, ctx *gofuse.Context) (*gofuse.Attr, gofuse.Status) {
+func (fs *TierFS) GetAttr(name string, ctx *gofuse.Context) (attr *gofuse.Attr, status gofuse.Status) {
+	start := time.Now()
+	defer func() { fs.fuseOp("GetAttr", status, start) }()
 	if name == "" {
 		// Root directory.
 		return &gofuse.Attr{
@@ -152,7 +170,9 @@ func (fs *TierFS) GetAttr(name string, ctx *gofuse.Context) (*gofuse.Attr, gofus
 }
 
 // OpenDir returns the immediate children of the directory name.
-func (fs *TierFS) OpenDir(name string, ctx *gofuse.Context) ([]gofuse.DirEntry, gofuse.Status) {
+func (fs *TierFS) OpenDir(name string, ctx *gofuse.Context) (_ []gofuse.DirEntry, status gofuse.Status) {
+	start := time.Now()
+	defer func() { fs.fuseOp("OpenDir", status, start) }()
 	entries, err := fs.meta.ListDir(context.Background(), name)
 	if err != nil {
 		fs.log.Error("ListDir", zap.String("dir", name), zap.Error(err))
@@ -212,7 +232,9 @@ func (fs *TierFS) Rmdir(name string, ctx *gofuse.Context) gofuse.Status {
 // ── File operations ───────────────────────────────────────────────────────────
 
 // Create opens a new file for writing. Data lands on the hot tier.
-func (fs *TierFS) Create(name string, flags uint32, mode uint32, ctx *gofuse.Context) (nodefs.File, gofuse.Status) {
+func (fs *TierFS) Create(name string, flags uint32, mode uint32, ctx *gofuse.Context) (_ nodefs.File, status gofuse.Status) {
+	start := time.Now()
+	defer func() { fs.fuseOp("Create", status, start) }()
 	goCtx := context.Background()
 	backend, tierName, err := fs.svc.WriteTarget(name)
 	if err != nil {
@@ -281,7 +303,9 @@ func isWriteFlags(flags uint32) bool {
 }
 
 // Open opens an existing file for reading (or reading+writing).
-func (fs *TierFS) Open(name string, flags uint32, ctx *gofuse.Context) (nodefs.File, gofuse.Status) {
+func (fs *TierFS) Open(name string, flags uint32, ctx *gofuse.Context) (_ nodefs.File, status gofuse.Status) {
+	start := time.Now()
+	defer func() { fs.fuseOp("Open", status, start) }()
 	goCtx := context.Background()
 	backend, localPath, fileInfo, err := fs.svc.ReadTarget(goCtx, name)
 	if err != nil {
@@ -395,7 +419,9 @@ func (fs *TierFS) Open(name string, flags uint32, ctx *gofuse.Context) (nodefs.F
 }
 
 // Unlink deletes a file.
-func (fs *TierFS) Unlink(name string, ctx *gofuse.Context) gofuse.Status {
+func (fs *TierFS) Unlink(name string, ctx *gofuse.Context) (status gofuse.Status) {
+	start := time.Now()
+	defer func() { fs.fuseOp("Unlink", status, start) }()
 	if err := fs.svc.OnDelete(context.Background(), name); err != nil {
 		if errors.Is(err, domain.ErrNotExist) {
 			return gofuse.ENOENT

@@ -70,8 +70,22 @@ function useMetricsWindow(maxPoints = 120) {
     const ts = now.toTimeString().slice(0, 8);
 
     // Extract values from the raw Prometheus JSON.
+    // Handles counters/gauges (numeric or labelled arrays) and histograms
+    // (Gather() returns histograms as arrays with .sum/.count per item,
+    // NOT as separate _sum/_count metric families).
     const getVal = (name, labels) => {
-      const v = raw[name];
+      let v = raw[name];
+      // Handle histogram _sum/_count suffix lookups.
+      if (v === undefined) {
+        if (name.endsWith("_sum")) {
+          const arr = raw[name.slice(0, -4)];
+          if (Array.isArray(arr)) return arr.reduce((s, x) => s + (x.sum || 0), 0);
+        } else if (name.endsWith("_count")) {
+          const arr = raw[name.slice(0, -6)];
+          if (Array.isArray(arr)) return arr.reduce((s, x) => s + (x.count || 0), 0);
+        }
+        return 0;
+      }
       if (typeof v === "number") return v;
       if (Array.isArray(v)) {
         if (!labels) return v.reduce((s, x) => s + (x.value || 0), 0);

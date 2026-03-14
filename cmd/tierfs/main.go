@@ -108,6 +108,7 @@ func run(cfgPath string) error {
 	}
 	stager := app.NewStager(cfg.Mount.StageDir, log)
 	svc := app.NewTierService(cfg, meta, backends, stager, stageTTL, log)
+	svc.Replicator().SetRegistry(obs.Metrics)
 	svc.Start()
 	defer svc.Stop()
 
@@ -127,7 +128,7 @@ func run(cfgPath string) error {
 	}
 
 	// ── FUSE mount ────────────────────────────────────────────────────────────
-	tierFS := fuse.New(svc, meta, stager, log)
+	tierFS := fuse.New(svc, meta, stager, log, obs.Metrics)
 	entryTTL, attrTTL, negTTL := cfg.Mount.MountCacheTimeouts()
 	cache := fuse.CacheConfig{
 		EntryTimeout:    entryTTL,

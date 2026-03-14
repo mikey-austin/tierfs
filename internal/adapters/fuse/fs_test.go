@@ -394,7 +394,7 @@ func makeFuseFS(t *testing.T) (*TierFS, *memMeta, *file.Backend, *memBackend, *a
 
 	svc := app.NewTierService(cfg, meta, backends, nil, 0, log)
 	stager := app.NewStager(stageDir, log)
-	fs := New(svc, meta, stager, log)
+	fs := New(svc, meta, stager, log, nil)
 	return fs, meta, fb, mb, stager
 }
 
