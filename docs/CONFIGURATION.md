@@ -24,11 +24,11 @@ The file uses [TOML v1.0](https://toml.io/en/v1.0.0) syntax. String values must 
 
 Controls the FUSE mount point and storage paths for metadata and staging.
 
-| Field | Type | Default | Required | Description |
-|---|---|---|---|---|
-| `path` | string | — | **yes** | Absolute path where the FUSE filesystem is mounted. The directory must exist and be empty. |
-| `meta_db` | string | — | **yes** | Absolute path for the SQLite metadata database. The file is created on first run; the directory must exist. |
-| `stage_dir` | string | `"/tmp/tierfs-stage"` | no | Temporary directory used when staging files from remote (non-local) backends for reads. Must be on a filesystem with sufficient free space. |
+| Field       | Type   | Default               | Required | Description                                                                                                                                 |
+|-------------|--------|-----------------------|----------|---------------------------------------------------------------------------------------------------------------------------------------------|
+| `path`      | string | —                     | **yes**  | Absolute path where the FUSE filesystem is mounted. The directory must exist and be empty.                                                  |
+| `meta_db`   | string | —                     | **yes**  | Absolute path for the SQLite metadata database. The file is created on first run; the directory must exist.                                 |
+| `stage_dir` | string | `"/tmp/tierfs-stage"` | no       | Temporary directory used when staging files from remote (non-local) backends for reads. Must be on a filesystem with sufficient free space. |
 
 > **NOTE:** The mount `path` must be accessible by the user running tierfs. On systems with default FUSE configuration, only root can mount FUSE filesystems. Grant non-root access by adding `user_allow_other` to `/etc/fuse.conf` and running with `--allow-other` in the mount options, or run tierfs as root with `CAP_SYS_ADMIN`.
 >
@@ -47,13 +47,13 @@ stage_dir = "/tmp/tierfs-stage"
 
 Controls the async worker pool that copies files between tiers after a write.
 
-| Field | Type | Default | Required | Description |
-|---|---|---|---|---|
-| `workers` | int | `4` | no | Number of concurrent copy goroutines. Each worker holds one source `Get()` stream and one destination `Put()` stream open simultaneously. Range: 1–64. |
-| `retry_interval` | duration | `"30s"` | no | How long to wait before retrying a failed copy or a write-active delay. No exponential backoff. |
-| `max_retries` | int | `5` | no | Maximum number of attempts per job. Set to `0` for infinite retries. After exhausting retries the job is dropped and an error is logged; the file remains on the source tier. |
-| `verify` | string | `"digest"` | no | Post-copy verification mode. One of `"none"`, `"size"`, or `"digest"`. See below. |
-| `write_quiescence` | duration | `"0s"` | no | Minimum idle time after the last write handle closes before a file is eligible for replication. See [Write Safety](#write-safety) below. |
+| Field              | Type     | Default    | Required | Description                                                                                                                                                                   |
+|--------------------|----------|------------|----------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `workers`          | int      | `4`        | no       | Number of concurrent copy goroutines. Each worker holds one source `Get()` stream and one destination `Put()` stream open simultaneously. Range: 1–64.                        |
+| `retry_interval`   | duration | `"30s"`    | no       | How long to wait before retrying a failed copy or a write-active delay. No exponential backoff.                                                                               |
+| `max_retries`      | int      | `5`        | no       | Maximum number of attempts per job. Set to `0` for infinite retries. After exhausting retries the job is dropped and an error is logged; the file remains on the source tier. |
+| `verify`           | string   | `"digest"` | no       | Post-copy verification mode. One of `"none"`, `"size"`, or `"digest"`. See below.                                                                                             |
+| `write_quiescence` | duration | `"0s"`     | no       | Minimum idle time after the last write handle closes before a file is eligible for replication. See [Write Safety](#write-safety) below.                                      |
 
 ### Write Safety
 
@@ -71,14 +71,14 @@ These three mechanisms together mean that: a file that is being actively written
 
 ### Choosing `write_quiescence`
 
-| Workload | Recommended value | Reason |
-|---|---|---|
-| Frigate NVR recordings | `"0s"` (default) | Segments are complete and immutable on close |
-| Frigate NVR clips | `"0s"` | Same |
-| Immich original ingest | `"5s"` | EXIF writer may touch file briefly after upload completes |
-| General video transcoding | `"10s"` | Muxers vary; 10s covers most moov-atom fixup patterns |
-| Samba/NFS writes from Windows | `"30s"` | Windows delayed-write cache can hold dirty pages for up to 30s |
-| Conservative / unknown | `"60s"` | Safe default for any workload you haven't profiled |
+| Workload                      | Recommended value | Reason                                                         |
+|-------------------------------|-------------------|----------------------------------------------------------------|
+| Frigate NVR recordings        | `"0s"` (default)  | Segments are complete and immutable on close                   |
+| Frigate NVR clips             | `"0s"`            | Same                                                           |
+| Immich original ingest        | `"5s"`            | EXIF writer may touch file briefly after upload completes      |
+| General video transcoding     | `"10s"`           | Muxers vary; 10s covers most moov-atom fixup patterns          |
+| Samba/NFS writes from Windows | `"30s"`           | Windows delayed-write cache can hold dirty pages for up to 30s |
+| Conservative / unknown        | `"60s"`           | Safe default for any workload you haven't profiled             |
 
 The cost of a higher quiescence value is only replication latency — files wait longer before being copied to the cold tier. There is no correctness risk from setting it too high.
 
@@ -138,12 +138,12 @@ capacity_headroom  = 0.70
 
 ### [observability.logging]
 
-| Field | Type | Default | Required | Description |
-|---|---|---|---|---|
-| `level` | string | `"info"` | no | Minimum log level. One of `"debug"`, `"info"`, `"warn"`, `"error"`. |
-| `format` | string | `"json"` | no | Output format. `"json"` for structured JSON (production); `"console"` for human-readable (development). |
-| `output_paths` | []string | `["stdout"]` | no | List of sinks. Each entry is `"stdout"`, `"stderr"`, or an absolute file path. |
-| `development` | bool | `false` | no | Enables caller location and stack traces on error-level logs. |
+| Field          | Type     | Default      | Required | Description                                                                                             |
+|----------------|----------|--------------|----------|---------------------------------------------------------------------------------------------------------|
+| `level`        | string   | `"info"`     | no       | Minimum log level. One of `"debug"`, `"info"`, `"warn"`, `"error"`.                                     |
+| `format`       | string   | `"json"`     | no       | Output format. `"json"` for structured JSON (production); `"console"` for human-readable (development). |
+| `output_paths` | []string | `["stdout"]` | no       | List of sinks. Each entry is `"stdout"`, `"stderr"`, or an absolute file path.                          |
+| `development`  | bool     | `false`      | no       | Enables caller location and stack traces on error-level logs.                                           |
 
 #### Log Levels in TierFS Context
 
@@ -172,12 +172,12 @@ capacity_headroom  = 0.70
 
 Only active when `output_paths` contains at least one file path.
 
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `max_size_mb` | int | `100` | File size in MB before rotation |
-| `max_backups` | int | `5` | Number of old log files to retain |
-| `max_age_days` | int | `30` | Delete rotated files older than this |
-| `compress` | bool | `true` | Gzip rotated files |
+| Field          | Type | Default | Description                          |
+|----------------|------|---------|--------------------------------------|
+| `max_size_mb`  | int  | `100`   | File size in MB before rotation      |
+| `max_backups`  | int  | `5`     | Number of old log files to retain    |
+| `max_age_days` | int  | `30`    | Delete rotated files older than this |
+| `compress`     | bool | `true`  | Gzip rotated files                   |
 
 ```toml
 [observability.logging]
@@ -195,11 +195,11 @@ compress     = true
 
 ### [observability.metrics]
 
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `enabled` | bool | `true` | Expose the Prometheus `/metrics` endpoint |
-| `address` | string | `":9100"` | TCP listen address |
-| `path` | string | `"/metrics"` | HTTP path for Prometheus scrape |
+| Field     | Type   | Default      | Description                               |
+|-----------|--------|--------------|-------------------------------------------|
+| `enabled` | bool   | `true`       | Expose the Prometheus `/metrics` endpoint |
+| `address` | string | `":9100"`    | TCP listen address                        |
+| `path`    | string | `"/metrics"` | HTTP path for Prometheus scrape           |
 
 The metrics server also serves `GET /healthz` → `200 ok` on the same address.
 
@@ -207,13 +207,13 @@ Exposed metric names (namespace `tierfs_`): `backend_operations_total`, `backend
 
 ### [observability.tracing]
 
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `enabled` | bool | `false` | Send OTLP spans to a collector |
-| `endpoint` | string | `"localhost:4317"` | OTLP gRPC endpoint (no scheme prefix) |
-| `service_name` | string | `"tierfs"` | `service.name` resource attribute |
-| `sample_rate` | float | `1.0` | Fraction of traces to sample (0.0–1.0) |
-| `insecure` | bool | `false` | Disable TLS on the OTLP connection |
+| Field          | Type   | Default            | Description                            |
+|----------------|--------|--------------------|----------------------------------------|
+| `enabled`      | bool   | `false`            | Send OTLP spans to a collector         |
+| `endpoint`     | string | `"localhost:4317"` | OTLP gRPC endpoint (no scheme prefix)  |
+| `service_name` | string | `"tierfs"`         | `service.name` resource attribute      |
+| `sample_rate`  | float  | `1.0`              | Fraction of traces to sample (0.0–1.0) |
+| `insecure`     | bool   | `false`            | Disable TLS on the OTLP connection     |
 
 Compatible with any OTLP-capable collector: Grafana Tempo, Jaeger, Honeycomb, Datadog Agent (OTLP mode), OpenTelemetry Collector.
 
@@ -223,15 +223,15 @@ Compatible with any OTLP-capable collector: Grafana Tempo, Jaeger, Honeycomb, Da
 
 Defines a named storage target. Each backend is referenced by one or more `[[tier]]` entries.
 
-| Field | Type | Default | Required | Description |
-|---|---|---|---|---|
-| `name` | string | — | **yes** | Unique identifier; referenced by `[[tier]].backend` |
-| `uri` | string | — | **yes** | Storage URI. `file:///absolute/path` or `s3://bucket/optional-prefix` |
-| `endpoint` | string | — | S3 only | Custom endpoint URL including scheme. Required for non-AWS S3. |
-| `region` | string | — | S3 only | AWS region. Use `"us-east-1"` for MinIO/Ceph that don't enforce region. |
-| `path_style` | bool | `false` | S3 only | Force path-style URLs (`endpoint/bucket/key`). Required for MinIO and Ceph. |
-| `access_key` | string | — | S3 only | AWS access key ID. Prefer `AWS_ACCESS_KEY_ID` environment variable. |
-| `secret_key` | string | — | S3 only | AWS secret access key. Prefer `AWS_SECRET_ACCESS_KEY` environment variable. |
+| Field        | Type   | Default | Required | Description                                                                 |
+|--------------|--------|---------|----------|-----------------------------------------------------------------------------|
+| `name`       | string | —       | **yes**  | Unique identifier; referenced by `[[tier]].backend`                         |
+| `uri`        | string | —       | **yes**  | Storage URI. `file:///absolute/path` or `s3://bucket/optional-prefix`       |
+| `endpoint`   | string | —       | S3 only  | Custom endpoint URL including scheme. Required for non-AWS S3.              |
+| `region`     | string | —       | S3 only  | AWS region. Use `"us-east-1"` for MinIO/Ceph that don't enforce region.     |
+| `path_style` | bool   | `false` | S3 only  | Force path-style URLs (`endpoint/bucket/key`). Required for MinIO and Ceph. |
+| `access_key` | string | —       | S3 only  | AWS access key ID. Prefer `AWS_ACCESS_KEY_ID` environment variable.         |
+| `secret_key` | string | —       | S3 only  | AWS secret access key. Prefer `AWS_SECRET_ACCESS_KEY` environment variable. |
 
 ### URI Scheme Reference
 
@@ -253,14 +253,14 @@ Credentials are resolved in this order:
 
 ### S3 Compatibility Matrix
 
-| Service | `endpoint` | `path_style` | Notes |
-|---|---|---|---|
-| AWS S3 | _(omit)_ | `false` | Default; region required |
-| MinIO | `https://minio.lan:9000` | `true` | Required for non-virtual-host MinIO |
-| Ceph RGW | `https://ceph.lan:7480` | `true` | RGW default port is 7480 |
-| Backblaze B2 | `https://s3.us-west-004.backblazeb2.com` | `false` | Region in endpoint URL; get from B2 console |
-| Garage | `https://garage.lan:3900` | `true` | s3_region = "garage" |
-| Cloudflare R2 | `https://ACCOUNT.r2.cloudflarestorage.com` | `false` | No egress fees |
+| Service       | `endpoint`                                 | `path_style` | Notes                                       |
+|---------------|--------------------------------------------|--------------|---------------------------------------------|
+| AWS S3        | _(omit)_                                   | `false`      | Default; region required                    |
+| MinIO         | `https://minio.lan:9000`                   | `true`       | Required for non-virtual-host MinIO         |
+| Ceph RGW      | `https://ceph.lan:7480`                    | `true`       | RGW default port is 7480                    |
+| Backblaze B2  | `https://s3.us-west-004.backblazeb2.com`   | `false`      | Region in endpoint URL; get from B2 console |
+| Garage        | `https://garage.lan:3900`                  | `true`       | s3_region = "garage"                        |
+| Cloudflare R2 | `https://ACCOUNT.r2.cloudflarestorage.com` | `false`      | No egress fees                              |
 
 ---
 
@@ -272,18 +272,18 @@ Any backend can have an optional `[backend.transform]` block that applies compre
 
 ### [backend.transform.compression]
 
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `level` | int | `-1` | gzip compression level. `1` = fastest, `9` = best compression, `-1` = default (≈6). Use `1` for video/media (already compressed); use `6`–`9` for logs, databases, or text-heavy data. |
+| Field   | Type | Default | Description                                                                                                                                                                            |
+|---------|------|---------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `level` | int  | `-1`    | gzip compression level. `1` = fastest, `9` = best compression, `-1` = default (≈6). Use `1` for video/media (already compressed); use `6`–`9` for logs, databases, or text-heavy data. |
 
 > **For Frigate recordings (H.264/H.265):** the compression ratio will be near 1.0 — the data is already compressed. Adding compression only wastes CPU. Omit `[backend.transform.compression]` for video workloads. Use it for NAS tiers storing metadata, SQLite exports, or log archives.
 
 ### [backend.transform.encryption]
 
-| Field | Type | Default | Required | Description |
-|---|---|---|---|---|
-| `key_env` | string | — | one of | Environment variable name containing the 64-char hex key. Takes precedence over `key_hex`. **Preferred for production.** |
-| `key_hex` | string | — | one of | 64-character lowercase hex string (32 bytes). Avoid committing to VCS. |
+| Field     | Type   | Default | Required | Description                                                                                                              |
+|-----------|--------|---------|----------|--------------------------------------------------------------------------------------------------------------------------|
+| `key_env` | string | —       | one of   | Environment variable name containing the 64-char hex key. Takes precedence over `key_hex`. **Preferred for production.** |
+| `key_hex` | string | —       | one of   | 64-character lowercase hex string (32 bytes). Avoid committing to VCS.                                                   |
 
 The encryption algorithm is AES-256-GCM in a chunked streaming format (64 KiB chunks, random nonce per chunk, chunk index as AAD to prevent reordering). Each chunk is independently authenticated; corruption is detected at read time per chunk rather than requiring the entire file to be read first.
 
@@ -364,24 +364,24 @@ The SMB backend uses a pure-Go SMB2/3 client (`github.com/hirochachacha/go-smb2`
 smb://[user[:password]@]host[:port]/share[/optional/prefix]
 ```
 
-| Example | Description |
-|---|---|
-| `smb://nas.lan/recordings` | Synology NAS, share `recordings`, no prefix |
-| `smb://admin:secret@192.168.1.10/cctv/frigate` | Credentials in URI, prefix `frigate` |
-| `smb://nas.lan:445/data` | Explicit port (same as default) |
-| `smb://[::1]/share` | IPv6 host |
+| Example                                        | Description                                 |
+|------------------------------------------------|---------------------------------------------|
+| `smb://nas.lan/recordings`                     | Synology NAS, share `recordings`, no prefix |
+| `smb://admin:secret@192.168.1.10/cctv/frigate` | Credentials in URI, prefix `frigate`        |
+| `smb://nas.lan:445/data`                       | Explicit port (same as default)             |
+| `smb://[::1]/share`                            | IPv6 host                                   |
 
 > **Security:** Embedding passwords in the URI stores them in the config file on disk. Use `smb_username`/`smb_password` config fields or `TIERFS_SMB_USER`/`TIERFS_SMB_PASS` environment variables instead.
 
 ### [[backend]] Fields for SMB
 
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `uri` | string | — | SMB URI (see format above). Credentials here are lowest priority. |
-| `smb_username` | string | — | NTLM username. Prefer `TIERFS_SMB_USER` env var. |
-| `smb_password` | string | — | NTLM password. Prefer `TIERFS_SMB_PASS` env var. |
-| `smb_domain` | string | `""` | Windows/AD domain. Leave empty for workgroup NAS (Synology, TrueNAS, QNAP). Required for Active Directory environments. |
-| `smb_require_encryption` | bool | `false` | Request SMB3 session encryption. Requires SMB 3.0+ on the server. Most NAS firmware from 2015+ qualifies. |
+| Field                    | Type   | Default | Description                                                                                                             |
+|--------------------------|--------|---------|-------------------------------------------------------------------------------------------------------------------------|
+| `uri`                    | string | —       | SMB URI (see format above). Credentials here are lowest priority.                                                       |
+| `smb_username`           | string | —       | NTLM username. Prefer `TIERFS_SMB_USER` env var.                                                                        |
+| `smb_password`           | string | —       | NTLM password. Prefer `TIERFS_SMB_PASS` env var.                                                                        |
+| `smb_domain`             | string | `""`    | Windows/AD domain. Leave empty for workgroup NAS (Synology, TrueNAS, QNAP). Required for Active Directory environments. |
+| `smb_require_encryption` | bool   | `false` | Request SMB3 session encryption. Requires SMB 3.0+ on the server. Most NAS firmware from 2015+ qualifies.               |
 
 ### Credential Resolution Order
 
@@ -391,14 +391,14 @@ smb://[user[:password]@]host[:port]/share[/optional/prefix]
 
 ### NAS Compatibility
 
-| Device | Protocol | Notes |
-|---|---|---|
-| Synology DSM 6+ | SMB2/SMB3 | Enable SMB in File Services; create a dedicated share |
-| TrueNAS CORE/SCALE | SMB2/SMB3 | Create a share via Web UI; ACL must allow the user |
-| QNAP QTS | SMB2/SMB3 | Enable Windows Network Neighborhood; create a shared folder |
-| Windows Server | SMB2/SMB3 | Use a service account with write access to the share |
-| Linux Samba | SMB2/SMB3 | Set `min protocol = SMB2` in `smb.conf` |
-| Raspberry Pi (Samba) | SMB2 | Works well; disable SMB1 in smb.conf |
+| Device               | Protocol  | Notes                                                       |
+|----------------------|-----------|-------------------------------------------------------------|
+| Synology DSM 6+      | SMB2/SMB3 | Enable SMB in File Services; create a dedicated share       |
+| TrueNAS CORE/SCALE   | SMB2/SMB3 | Create a share via Web UI; ACL must allow the user          |
+| QNAP QTS             | SMB2/SMB3 | Enable Windows Network Neighborhood; create a shared folder |
+| Windows Server       | SMB2/SMB3 | Use a service account with write access to the share        |
+| Linux Samba          | SMB2/SMB3 | Set `min protocol = SMB2` in `smb.conf`                     |
+| Raspberry Pi (Samba) | SMB2      | Works well; disable SMB1 in smb.conf                        |
 
 ### Connection Resilience
 
@@ -477,26 +477,26 @@ The SFTP backend uses a pure-Go SSH/SFTP client (`github.com/pkg/sftp` over `gol
 sftp://[user@]host[:port]/base/path[/optional/prefix]
 ```
 
-| Example | Description |
-|---|---|
-| `sftp://nas.lan/mnt/storage/cctv` | OpenSSH on NAS, base `/mnt/storage`, prefix `cctv` |
-| `sftp://admin@192.168.1.10/data/frigate` | Explicit user, base `/data`, prefix `frigate` |
-| `sftp://backup@offsite.example.com:2222/backups/tier2` | Non-standard port, offsite server |
-| `sftp://[::1]/srv/media` | IPv6 host |
+| Example                                                | Description                                        |
+|--------------------------------------------------------|----------------------------------------------------|
+| `sftp://nas.lan/mnt/storage/cctv`                      | OpenSSH on NAS, base `/mnt/storage`, prefix `cctv` |
+| `sftp://admin@192.168.1.10/data/frigate`               | Explicit user, base `/data`, prefix `frigate`      |
+| `sftp://backup@offsite.example.com:2222/backups/tier2` | Non-standard port, offsite server                  |
+| `sftp://[::1]/srv/media`                               | IPv6 host                                          |
 
 The path is split at the first component: `sftp://host/mnt/storage/cctv` → `basePath=/mnt`, `prefix=storage/cctv`. This matches the SMB convention of keeping the mount root and sub-path distinct in config.
 
 ### [[backend]] Fields for SFTP
 
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `uri` | string | — | SFTP URI (see format above) |
-| `sftp_username` | string | — | SSH username. Prefer `TIERFS_SFTP_USER` env var. Falls back to OS user (`$USER`). |
-| `sftp_password` | string | — | SSH password. Prefer `TIERFS_SFTP_PASS` env var. Leave empty when using key auth. |
-| `sftp_key_path` | string | — | Absolute path to PEM private key. Prefer `TIERFS_SFTP_KEY_PATH` env var. If empty, tries `~/.ssh/id_ed25519`, `~/.ssh/id_ecdsa`, `~/.ssh/id_rsa`. |
-| `sftp_key_passphrase` | string | — | Decrypts an encrypted private key. Prefer `TIERFS_SFTP_KEY_PASSPHRASE` env var. |
-| `sftp_host_key` | string | — | Expected server public key in `authorized_keys` format (`ssh-ed25519 AAAA...`). If empty, host key verification is skipped (insecure). |
-| `sftp_known_hosts_file` | string | — | Path to a `known_hosts` file. Takes precedence over `sftp_host_key`. *(Not yet implemented — use `sftp_host_key` for now.)* |
+| Field                   | Type   | Default | Description                                                                                                                                       |
+|-------------------------|--------|---------|---------------------------------------------------------------------------------------------------------------------------------------------------|
+| `uri`                   | string | —       | SFTP URI (see format above)                                                                                                                       |
+| `sftp_username`         | string | —       | SSH username. Prefer `TIERFS_SFTP_USER` env var. Falls back to OS user (`$USER`).                                                                 |
+| `sftp_password`         | string | —       | SSH password. Prefer `TIERFS_SFTP_PASS` env var. Leave empty when using key auth.                                                                 |
+| `sftp_key_path`         | string | —       | Absolute path to PEM private key. Prefer `TIERFS_SFTP_KEY_PATH` env var. If empty, tries `~/.ssh/id_ed25519`, `~/.ssh/id_ecdsa`, `~/.ssh/id_rsa`. |
+| `sftp_key_passphrase`   | string | —       | Decrypts an encrypted private key. Prefer `TIERFS_SFTP_KEY_PASSPHRASE` env var.                                                                   |
+| `sftp_host_key`         | string | —       | Expected server public key in `authorized_keys` format (`ssh-ed25519 AAAA...`). If empty, host key verification is skipped (insecure).            |
+| `sftp_known_hosts_file` | string | —       | Path to a `known_hosts` file. Takes precedence over `sftp_host_key`. *(Not yet implemented — use `sftp_host_key` for now.)*                       |
 
 ### Authentication Methods
 
@@ -598,16 +598,16 @@ uri  = "sftp://myuser@dev-nas.local/home/myuser/tierfs-test"
 
 ### NAS / Server Compatibility
 
-| Server | Notes |
-|---|---|
-| OpenSSH (Linux, macOS, BSD) | Full support; use `sftp` subsystem (default). Set `Subsystem sftp /usr/lib/openssh/sftp-server` in `sshd_config`. |
-| Synology DSM | Enable SSH in Control Panel → Terminal & SNMP. SFTP uses port 22. |
-| TrueNAS SCALE | Enable SSH service; add user with SSH key in Credentials. |
-| QNAP QTS | Enable SSH in Control Panel → Network & File Services → Telnet/SSH. |
-| Dropbear | Full support; commonly used on embedded NAS and routers. |
-| ProFTPD (mod_sftp) | Full support. |
-| Windows OpenSSH | Full support since Windows Server 2019. Paths use forward slashes. Rename-over-existing may need Remove+Rename fallback (handled automatically). |
-| Rebex SFTP server | Full support. |
+| Server                      | Notes                                                                                                                                            |
+|-----------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------|
+| OpenSSH (Linux, macOS, BSD) | Full support; use `sftp` subsystem (default). Set `Subsystem sftp /usr/lib/openssh/sftp-server` in `sshd_config`.                                |
+| Synology DSM                | Enable SSH in Control Panel → Terminal & SNMP. SFTP uses port 22.                                                                                |
+| TrueNAS SCALE               | Enable SSH service; add user with SSH key in Credentials.                                                                                        |
+| QNAP QTS                    | Enable SSH in Control Panel → Network & File Services → Telnet/SSH.                                                                              |
+| Dropbear                    | Full support; commonly used on embedded NAS and routers.                                                                                         |
+| ProFTPD (mod_sftp)          | Full support.                                                                                                                                    |
+| Windows OpenSSH             | Full support since Windows Server 2019. Paths use forward slashes. Rename-over-existing may need Remove+Rename fallback (handled automatically). |
+| Rebex SFTP server           | Full support.                                                                                                                                    |
 
 ### Troubleshooting SFTP
 
@@ -655,26 +655,26 @@ capacity = "unlimited" # null tier has no storage; this is always unlimited
 
 Defines a named storage tier. Tiers are ordered by `priority`; writes always go to the lowest priority number.
 
-| Field | Type | Default | Required | Description |
-|---|---|---|---|---|
-| `name` | string | — | **yes** | Unique tier identifier; referenced by `[[rule]]` evict schedules |
-| `backend` | string | — | **yes** | References a `[[backend]].name` |
-| `priority` | int | — | **yes** | 0 = hottest tier; higher numbers = colder. Must be unique across tiers. |
-| `capacity` | string | — | **yes** | Maximum bytes this tier is allowed to hold. Used for capacity-pressure eviction. |
+| Field      | Type   | Default | Required | Description                                                                      |
+|------------|--------|---------|----------|----------------------------------------------------------------------------------|
+| `name`     | string | —       | **yes**  | Unique tier identifier; referenced by `[[rule]]` evict schedules                 |
+| `backend`  | string | —       | **yes**  | References a `[[backend]].name`                                                  |
+| `priority` | int    | —       | **yes**  | 0 = hottest tier; higher numbers = colder. Must be unique across tiers.          |
+| `capacity` | string | —       | **yes**  | Maximum bytes this tier is allowed to hold. Used for capacity-pressure eviction. |
 
 **Priority ordering**: New file writes always land on the tier with `priority = 0`. If that tier is full (capacity pressure) and no cold tier has a verified copy, the write proceeds anyway and capacity pressure eviction will reclaim space on the next tick.
 
 **Capacity parsing**: Values are parsed case-insensitively. Supported suffixes:
 
-| Suffix | Multiplier |
-|---|---|
-| `B` | 1 |
-| `KiB` / `KB` | 1,024 / 1,000 |
-| `MiB` / `MB` | 1,048,576 / 1,000,000 |
-| `GiB` / `GB` | 1,073,741,824 / 1,000,000,000 |
-| `TiB` / `TB` | 2^40 / 10^12 |
-| `PiB` / `PB` | 2^50 / 10^15 |
-| `unlimited` | No capacity limit; capacity-pressure eviction disabled for this tier |
+| Suffix       | Multiplier                                                           |
+|--------------|----------------------------------------------------------------------|
+| `B`          | 1                                                                    |
+| `KiB` / `KB` | 1,024 / 1,000                                                        |
+| `MiB` / `MB` | 1,048,576 / 1,000,000                                                |
+| `GiB` / `GB` | 1,073,741,824 / 1,000,000,000                                        |
+| `TiB` / `TB` | 2^40 / 10^12                                                         |
+| `PiB` / `PB` | 2^50 / 10^15                                                         |
+| `unlimited`  | No capacity limit; capacity-pressure eviction disabled for this tier |
 
 ---
 
@@ -682,26 +682,26 @@ Defines a named storage tier. Tiers are ordered by `priority`; writes always go 
 
 Rules define the eviction policy for files matching a path pattern. **Rules are evaluated in declaration order; the first match wins.** A catch-all rule (`match = "**"`) at the end is required — TierFS will refuse to start if no such rule is present.
 
-| Field | Type | Default | Required | Description |
-|---|---|---|---|---|
-| `name` | string | — | **yes** | Unique rule identifier used in logs and metrics |
-| `match` | string | — | **yes** | Doublestar glob matched against the relative path |
-| `pin_tier` | string | `""` | no | Tier name; files matching this rule are never auto-evicted from this tier |
-| `evict_schedule` | []EvictStep | `[]` | no | Ordered list of eviction steps |
-| `promote_on_read` | bool\|string | `false` | no | `false`, or a tier name to promote to on first read |
-| `replicate` | bool | `true` | no | Whether to enqueue async replication after write |
+| Field             | Type         | Default | Required | Description                                                               |
+|-------------------|--------------|---------|----------|---------------------------------------------------------------------------|
+| `name`            | string       | —       | **yes**  | Unique rule identifier used in logs and metrics                           |
+| `match`           | string       | —       | **yes**  | Doublestar glob matched against the relative path                         |
+| `pin_tier`        | string       | `""`    | no       | Tier name; files matching this rule are never auto-evicted from this tier |
+| `evict_schedule`  | []EvictStep  | `[]`    | no       | Ordered list of eviction steps                                            |
+| `promote_on_read` | bool\|string | `false` | no       | `false`, or a tier name to promote to on first read                       |
+| `replicate`       | bool         | `true`  | no       | Whether to enqueue async replication after write                          |
 
 ### Glob Pattern Syntax
 
 Uses [doublestar](https://github.com/bmatcuk/doublestar) matching (same as `.gitignore`):
 
-| Pattern | Matches |
-|---|---|
-| `recordings/**` | All files under `recordings/`, at any depth |
-| `clips/*.mp4` | `.mp4` files directly in `clips/` (not subdirs) |
-| `thumbnails/**/*.jpg` | All `.jpg` files anywhere under `thumbnails/` |
-| `exports/2026/**` | All files under the 2026 subdirectory of exports |
-| `**` | All files (catch-all) |
+| Pattern               | Matches                                          |
+|-----------------------|--------------------------------------------------|
+| `recordings/**`       | All files under `recordings/`, at any depth      |
+| `clips/*.mp4`         | `.mp4` files directly in `clips/` (not subdirs)  |
+| `thumbnails/**/*.jpg` | All `.jpg` files anywhere under `thumbnails/`    |
+| `exports/2026/**`     | All files under the 2026 subdirectory of exports |
+| `**`                  | All files (catch-all)                            |
 
 ### Evict Schedule Semantics
 
@@ -772,14 +772,14 @@ TierFS prints the validation error and exits with code 1 if any of these constra
 
 ## Environment Variables
 
-| Variable | Used by | Description |
-|---|---|---|
-| `AWS_ACCESS_KEY_ID` | s3 backend | AWS / S3-compatible access key ID |
-| `AWS_SECRET_ACCESS_KEY` | s3 backend | AWS / S3-compatible secret access key |
-| `AWS_REGION` | s3 backend | Override region without config file change |
-| `AWS_ENDPOINT_URL` | s3 backend | Override endpoint without config file change (AWS SDK v2 standard) |
-| `B2_APPLICATION_KEY_ID` | s3 backend (Backblaze) | Backblaze B2 key ID (use as AWS_ACCESS_KEY_ID) |
-| `B2_APPLICATION_KEY` | s3 backend (Backblaze) | Backblaze B2 application key (use as AWS_SECRET_ACCESS_KEY) |
+| Variable                | Used by                | Description                                                        |
+|-------------------------|------------------------|--------------------------------------------------------------------|
+| `AWS_ACCESS_KEY_ID`     | s3 backend             | AWS / S3-compatible access key ID                                  |
+| `AWS_SECRET_ACCESS_KEY` | s3 backend             | AWS / S3-compatible secret access key                              |
+| `AWS_REGION`            | s3 backend             | Override region without config file change                         |
+| `AWS_ENDPOINT_URL`      | s3 backend             | Override endpoint without config file change (AWS SDK v2 standard) |
+| `B2_APPLICATION_KEY_ID` | s3 backend (Backblaze) | Backblaze B2 key ID (use as AWS_ACCESS_KEY_ID)                     |
+| `B2_APPLICATION_KEY`    | s3 backend (Backblaze) | Backblaze B2 application key (use as AWS_SECRET_ACCESS_KEY)        |
 
 ---
 

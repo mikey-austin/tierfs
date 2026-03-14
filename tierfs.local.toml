@@ -1,0 +1,54 @@
+[mount]
+path      = "/tmp/main"
+meta_db   = "/tmp/tierfs-local/meta.db"
+stage_dir = "/tmp/tierfs-local/stage"
+stage_ttl = "1h"
+
+[replication]
+workers          = 4
+verify           = "digest"
+retry_interval   = "5s"
+max_retries      = 3
+write_quiescence = "2s"
+sweep_interval   = "10s"
+backend_timeout  = "1m"
+
+[eviction]
+check_interval     = "10s"
+capacity_threshold = 0.85
+capacity_headroom  = 0.70
+
+[[backend]]
+name = "local-ssd"
+uri  = "file:///tmp/tier0"
+
+[[backend]]
+name = "local-cold"
+uri  = "file:///tmp/tier1"
+
+[backend.transform.compression]
+algorithm = "zstd"
+level     = 1
+
+[backend.transform.checksum]
+
+[backend.transform.encryption]
+key_hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+[[tier]]
+name     = "tier0"
+backend  = "local-ssd"
+priority = 0
+capacity = "1GiB"
+
+[[tier]]
+name     = "tier1"
+backend  = "local-cold"
+priority = 1
+capacity = "unlimited"
+
+[[rule]]
+name           = "default"
+match          = "**"
+replicate      = true
+evict_schedule = [{ after = "30s", to = "tier1" }]

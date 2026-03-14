@@ -48,6 +48,16 @@ type TierFS struct {
 	inodeMap   map[string]uint64
 	nextIno    atomic.Uint64
 	stageGroup singleflight.Group
+
+	// owner is captured at mount time so GetAttr returns the correct uid/gid
+	// for default_permissions enforcement.
+	uid uint32
+	gid uint32
+
+	// virtualDirs tracks directories created via Mkdir that don't yet have
+	// files beneath them. Entries are removed lazily when no longer needed.
+	virtualDirsMu sync.RWMutex
+	virtualDirs   map[string]struct{}
 }
 
 // New creates a TierFS. The returned value should be wrapped with
@@ -62,6 +72,9 @@ func New(svc *app.TierService, meta domain.MetadataStore, stager *app.Stager, lo
 		inodeMap:   make(map[string]uint64),
 	}
 	fs.nextIno.Store(2) // 1 is reserved for root
+	fs.uid = uint32(os.Getuid())
+	fs.gid = uint32(os.Getgid())
+	fs.virtualDirs = make(map[string]struct{})
 	return fs
 }
 
@@ -75,6 +88,7 @@ func (fs *TierFS) GetAttr(name string, ctx *gofuse.Context) (*gofuse.Attr, gofus
 			Mode:  gofuse.S_IFDIR | 0o755,
 			Ino:   1,
 			Nlink: 2,
+			Owner: gofuse.Owner{Uid: fs.uid, Gid: fs.gid},
 		}, gofuse.OK
 	}
 
@@ -88,6 +102,7 @@ func (fs *TierFS) GetAttr(name string, ctx *gofuse.Context) (*gofuse.Attr, gofus
 			Mtime: uint64(f.ModTime.Unix()),
 			Ino:   fs.inode(name),
 			Nlink: 1,
+			Owner: gofuse.Owner{Uid: fs.uid, Gid: fs.gid},
 		}, gofuse.OK
 	}
 
@@ -98,6 +113,20 @@ func (fs *TierFS) GetAttr(name string, ctx *gofuse.Context) (*gofuse.Attr, gofus
 			Mode:  gofuse.S_IFDIR | 0o755,
 			Ino:   fs.inode(name),
 			Nlink: 2,
+			Owner: gofuse.Owner{Uid: fs.uid, Gid: fs.gid},
+		}, gofuse.OK
+	}
+
+	// Check explicitly-created directories that don't have files yet.
+	fs.virtualDirsMu.RLock()
+	_, isVirtual := fs.virtualDirs[name]
+	fs.virtualDirsMu.RUnlock()
+	if isVirtual {
+		return &gofuse.Attr{
+			Mode:  gofuse.S_IFDIR | 0o755,
+			Ino:   fs.inode(name),
+			Nlink: 2,
+			Owner: gofuse.Owner{Uid: fs.uid, Gid: fs.gid},
 		}, gofuse.OK
 	}
 
@@ -131,6 +160,19 @@ func (fs *TierFS) OpenDir(name string, ctx *gofuse.Context) ([]gofuse.DirEntry, 
 // this is a no-op that returns OK (Frigate creates directories before writing files).
 func (fs *TierFS) Mkdir(name string, mode uint32, ctx *gofuse.Context) gofuse.Status {
 	fs.log.Debug("mkdir (virtual)", zap.String("name", name))
+	fs.virtualDirsMu.Lock()
+	fs.virtualDirs[name] = struct{}{}
+	fs.virtualDirsMu.Unlock()
+	return gofuse.OK
+}
+
+// Chmod is a no-op — TierFS does not track per-file permission bits.
+func (fs *TierFS) Chmod(name string, mode uint32, ctx *gofuse.Context) gofuse.Status {
+	return gofuse.OK
+}
+
+// Chown is a no-op — TierFS does not track per-file ownership.
+func (fs *TierFS) Chown(name string, uid uint32, gid uint32, ctx *gofuse.Context) gofuse.Status {
 	return gofuse.OK
 }
 
@@ -143,6 +185,9 @@ func (fs *TierFS) Rmdir(name string, ctx *gofuse.Context) gofuse.Status {
 	if len(entries) > 0 {
 		return gofuse.Status(syscall.ENOTEMPTY)
 	}
+	fs.virtualDirsMu.Lock()
+	delete(fs.virtualDirs, name)
+	fs.virtualDirsMu.Unlock()
 	return gofuse.OK
 }
 
