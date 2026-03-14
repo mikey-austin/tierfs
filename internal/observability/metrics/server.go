@@ -14,6 +14,7 @@ import (
 // Server is a lightweight HTTP server that exposes the /metrics endpoint.
 type Server struct {
 	srv *http.Server
+	mux *http.ServeMux
 	log *zap.Logger
 }
 
@@ -36,6 +37,7 @@ func NewServer(cfg config.MetricsConfig, reg *Registry, log *zap.Logger) *Server
 			WriteTimeout: 10 * time.Second,
 			IdleTimeout:  30 * time.Second,
 		},
+		mux: mux,
 		log: log.Named("metrics-server"),
 	}
 }
@@ -51,6 +53,14 @@ func (s *Server) Start() {
 			s.log.Error("metrics server error", zap.Error(err))
 		}
 	}()
+}
+
+// Mux returns the underlying ServeMux so additional routes can be registered.
+func (s *Server) Mux() *http.ServeMux {
+	if s == nil {
+		return nil
+	}
+	return s.mux
 }
 
 // Shutdown gracefully stops the server.

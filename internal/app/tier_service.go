@@ -363,6 +363,15 @@ func (ts *TierService) OnWriteComplete(ctx context.Context, relPath, tierName st
 // Guard returns the WriteGuard so the FUSE layer can call Open/Close on it.
 func (ts *TierService) Guard() *WriteGuard { return ts.guard }
 
+// Replicator returns the Replicator for admin API access.
+func (ts *TierService) Replicator() *Replicator { return ts.replicator }
+
+// Config returns the resolved configuration.
+func (ts *TierService) Config() *config.Resolved { return ts.cfg }
+
+// Meta returns the metadata store.
+func (ts *TierService) Meta() domain.MetadataStore { return ts.meta }
+
 // HottestTierName returns the name of the tier with priority 0.
 func (ts *TierService) HottestTierName() string {
 	return ts.cfg.HottestTier().Name

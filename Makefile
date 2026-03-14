@@ -8,8 +8,8 @@ GOFLAGS     := -trimpath
 
 all: build
 
-## build: compile the tierfs binary
-build:
+## build: build UI then compile the tierfs binary
+build: ui
 	go build $(GOFLAGS) $(LDFLAGS) -o bin/$(BINARY) $(CMD)
 
 ## ui: build the admin UI for production

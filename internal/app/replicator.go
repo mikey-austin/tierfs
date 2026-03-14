@@ -19,10 +19,11 @@ import (
 
 // CopyJob describes a single file replication operation between two tiers.
 type CopyJob struct {
-	RelPath  string
-	FromTier string // source tier name
-	ToTier   string // destination tier name
-	Retries  int    // current retry count
+	RelPath    string    `json:"relPath"`
+	FromTier   string    `json:"fromTier"`
+	ToTier     string    `json:"toTier"`
+	Retries    int       `json:"retries"`
+	EnqueuedAt time.Time `json:"enqueuedAt"`
 }
 
 // ReplicatorConfig holds settings for the replication worker pool.
@@ -55,17 +56,22 @@ type Replicator struct {
 	totalCopied atomic.Int64
 	totalFailed atomic.Int64
 	queueDepth  atomic.Int64
+
+	// Pending jobs shadow tracking for admin API.
+	pendingMu   sync.Mutex
+	pendingJobs map[string]*CopyJob
 }
 
 // NewReplicator creates a Replicator. Call Start() to begin processing.
 func NewReplicator(cfg ReplicatorConfig, meta domain.MetadataStore, tiers TierLookup, log *zap.Logger) *Replicator {
 	return &Replicator{
-		cfg:   cfg,
-		meta:  meta,
-		tiers: tiers,
-		log:   log.Named("replicator"),
-		queue: make(chan CopyJob, 4096),
-		stop:  make(chan struct{}),
+		cfg:         cfg,
+		meta:        meta,
+		tiers:       tiers,
+		log:         log.Named("replicator"),
+		queue:       make(chan CopyJob, 4096),
+		stop:        make(chan struct{}),
+		pendingJobs: make(map[string]*CopyJob),
 	}
 }
 
@@ -86,9 +92,16 @@ func (r *Replicator) Stop() {
 // Enqueue adds a job to the copy queue. Non-blocking; drops if queue is full
 // and logs a warning. Callers that need guaranteed delivery should retry.
 func (r *Replicator) Enqueue(job CopyJob) {
+	if job.EnqueuedAt.IsZero() {
+		job.EnqueuedAt = time.Now()
+	}
 	select {
 	case r.queue <- job:
 		r.queueDepth.Add(1)
+		r.pendingMu.Lock()
+		jc := job // copy
+		r.pendingJobs[job.RelPath] = &jc
+		r.pendingMu.Unlock()
 	default:
 		r.log.Warn("replication queue full, dropping job",
 			zap.String("rel_path", job.RelPath),
@@ -101,6 +114,17 @@ func (r *Replicator) Enqueue(job CopyJob) {
 // Metrics returns a snapshot of replicator counters.
 func (r *Replicator) Metrics() (copied, failed, depth int64) {
 	return r.totalCopied.Load(), r.totalFailed.Load(), r.queueDepth.Load()
+}
+
+// PendingJobs returns a snapshot of all jobs currently in the queue or being processed.
+func (r *Replicator) PendingJobs() []CopyJob {
+	r.pendingMu.Lock()
+	defer r.pendingMu.Unlock()
+	out := make([]CopyJob, 0, len(r.pendingJobs))
+	for _, j := range r.pendingJobs {
+		out = append(out, *j)
+	}
+	return out
 }
 
 func (r *Replicator) worker(id int) {
@@ -124,8 +148,6 @@ func (r *Replicator) worker(id int) {
 						zap.Int("retry", job.Retries),
 						zap.Error(err),
 					)
-					// Inline retry delay instead of spawning a goroutine
-					// to prevent unbounded goroutine growth under high failure rates.
 					retryTimer := time.NewTimer(r.cfg.RetryInterval)
 					select {
 					case <-r.stop:
@@ -139,9 +161,15 @@ func (r *Replicator) worker(id int) {
 						zap.String("rel_path", job.RelPath),
 						zap.Error(err),
 					)
+					r.pendingMu.Lock()
+					delete(r.pendingJobs, job.RelPath)
+					r.pendingMu.Unlock()
 				}
 			} else {
 				r.totalCopied.Add(1)
+				r.pendingMu.Lock()
+				delete(r.pendingJobs, job.RelPath)
+				r.pendingMu.Unlock()
 			}
 		}
 	}

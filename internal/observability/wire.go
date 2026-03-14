@@ -6,10 +6,13 @@ package observability
 
 import (
 	"context"
+	"net/http"
 
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 
+	"github.com/mikey-austin/tierfs/internal/admin"
 	"github.com/mikey-austin/tierfs/internal/config"
 	"github.com/mikey-austin/tierfs/internal/domain"
 	"github.com/mikey-austin/tierfs/internal/observability/decorators"
@@ -26,6 +29,7 @@ type Stack struct {
 
 	metricsServer *metrics.Server
 	tracingProv   *tracing.Provider
+	logBuffer     *admin.LogBuffer
 }
 
 // Wire builds the full observability stack from config, returning a Stack.
@@ -38,6 +42,12 @@ func Wire(cfg config.ObservabilityConfig, appName string) (*Stack, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// ── Log buffer (tee for admin UI) ────────────────────────────────────────
+	logBuf := admin.NewLogBuffer(500)
+	log = log.WithOptions(zap.WrapCore(func(core zapcore.Core) zapcore.Core {
+		return zapcore.NewTee(core, logBuf)
+	}))
 
 	// ── Tracing ──────────────────────────────────────────────────────────────
 	tp, err := tracing.New(cfg.Tracing)
@@ -58,6 +68,7 @@ func Wire(cfg config.ObservabilityConfig, appName string) (*Stack, error) {
 		Tracer:        tracer,
 		metricsServer: metricsSrv,
 		tracingProv:   tp,
+		logBuffer:     logBuf,
 	}, nil
 }
 
@@ -66,6 +77,16 @@ func (s *Stack) Shutdown(ctx context.Context) {
 	s.metricsServer.Shutdown(ctx) //nolint:errcheck
 	s.tracingProv.Shutdown(ctx)   //nolint:errcheck
 	s.Log.Sync()                  //nolint:errcheck
+}
+
+// Mux returns the HTTP mux from the metrics server for registering extra routes.
+func (s *Stack) Mux() *http.ServeMux {
+	return s.metricsServer.Mux()
+}
+
+// LogBuffer returns the admin log ring buffer.
+func (s *Stack) LogBuffer() *admin.LogBuffer {
+	return s.logBuffer
 }
 
 // WrapBackend applies the full observability decorator to a raw Backend.

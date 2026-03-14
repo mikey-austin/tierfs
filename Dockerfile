@@ -1,4 +1,13 @@
-# ── Stage 1: Build ────────────────────────────────────────────────────────────
+# ── Stage 1: Build Admin UI ──────────────────────────────────────────────────
+FROM node:22-bookworm-slim AS ui-builder
+
+WORKDIR /ui
+COPY web/admin/package.json web/admin/package-lock.json* ./
+RUN npm install --production=false
+COPY web/admin/ .
+RUN npm run build
+
+# ── Stage 2: Build Go Binary ────────────────────────────────────────────────
 FROM golang:1.26.1-bookworm AS builder
 
 WORKDIR /src
@@ -8,13 +17,15 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
+# Copy built UI assets into the embed directory.
+COPY --from=ui-builder /ui/dist/ ./web/admin/dist/
 
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -trimpath \
     -ldflags "-s -w -X main.version=$(git describe --tags --always --dirty 2>/dev/null || echo dev)" \
     -o /out/tierfs ./cmd/tierfs
 
-# ── Stage 2: Runtime ──────────────────────────────────────────────────────────
+# ── Stage 3: Runtime ────────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
 
 # fuse3 needed for fusermount3; ca-certificates for TLS to S3 endpoints.

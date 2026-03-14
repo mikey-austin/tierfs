@@ -2,6 +2,7 @@ package decorators
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -54,11 +55,21 @@ func (o *ObservableMetaStore) observe(ctx context.Context, op string) (context.C
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
-			o.log.Error("meta op failed",
-				zap.String("op", op),
-				zap.Duration("dur", dur),
-				zap.Error(err),
-			)
+			// ErrNotExist is a normal lookup path in FUSE (stat before
+			// create, kernel readahead, negative dentry population).
+			// Log at debug to avoid flooding the log with expected misses.
+			if errors.Is(err, domain.ErrNotExist) {
+				o.log.Debug("meta op not found",
+					zap.String("op", op),
+					zap.Duration("dur", dur),
+				)
+			} else {
+				o.log.Error("meta op failed",
+					zap.String("op", op),
+					zap.Duration("dur", dur),
+					zap.Error(err),
+				)
+			}
 		} else {
 			o.log.Debug("meta op ok", zap.String("op", op), zap.Duration("dur", dur))
 		}

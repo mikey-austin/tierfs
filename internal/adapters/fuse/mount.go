@@ -37,6 +37,7 @@ func Mount(fs *TierFS, mountPath string, cache CacheConfig, log *zap.Logger) (*g
 	opts := &gofuse.MountOptions{
 		Name:          "tierfs",
 		FsName:        "tierfs",
+		AllowOther:    true,
 		MaxBackground: 64,
 		MaxWrite:      1 << 20,
 		Debug:         false,

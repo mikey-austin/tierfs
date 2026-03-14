@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"os/signal"
@@ -20,10 +21,12 @@ import (
 	sftpbackend "github.com/mikey-austin/tierfs/internal/adapters/storage/sftp"
 	smbbackend "github.com/mikey-austin/tierfs/internal/adapters/storage/smb"
 	"github.com/mikey-austin/tierfs/internal/adapters/storage/transform"
+	"github.com/mikey-austin/tierfs/internal/admin"
 	"github.com/mikey-austin/tierfs/internal/app"
 	"github.com/mikey-austin/tierfs/internal/config"
 	"github.com/mikey-austin/tierfs/internal/domain"
 	"github.com/mikey-austin/tierfs/internal/observability"
+	adminui "github.com/mikey-austin/tierfs/web/admin"
 )
 
 func main() {
@@ -107,6 +110,21 @@ func run(cfgPath string) error {
 	svc := app.NewTierService(cfg, meta, backends, stager, stageTTL, log)
 	svc.Start()
 	defer svc.Stop()
+
+	// ── Admin API + SPA ──────────────────────────────────────────────────────
+	if mux := obs.Mux(); mux != nil {
+		adminHandler := admin.NewHandler(svc, obs.Metrics, obs.LogBuffer())
+		adminHandler.Register(mux)
+
+		// Serve embedded admin UI.
+		distFS, err := fs.Sub(adminui.DistFS, "dist")
+		if err != nil {
+			log.Warn("admin UI assets not available", zap.Error(err))
+		} else {
+			mux.Handle("/", admin.SPAFileServer(distFS))
+		}
+		log.Info("admin API registered on metrics server")
+	}
 
 	// ── FUSE mount ────────────────────────────────────────────────────────────
 	tierFS := fuse.New(svc, meta, stager, log)
