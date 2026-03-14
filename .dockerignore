@@ -1,0 +1,4 @@
+bin/
+*.toml
+coverage.out
+.git/

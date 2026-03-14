@@ -1,0 +1,31 @@
+# Build output
+bin/
+dist/
+
+# Go
+*.test
+coverage.out
+*.prof
+
+# Node / web admin
+web/admin/node_modules/
+web/admin/dist/
+
+# SQLite runtime files
+*.db
+*.db-shm
+*.db-wal
+
+# Secrets — never commit
+*.env
+.env*
+tierfs.env
+
+# macOS
+.DS_Store
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo

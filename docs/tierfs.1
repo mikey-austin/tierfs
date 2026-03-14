@@ -1,0 +1,431 @@
+.TH TIERFS 1 "2026-03-01" "tierfs 0.1.0" "User Commands"
+.
+.SH NAME
+tierfs \- transparent N\-tier FUSE storage tiering daemon
+.
+.SH SYNOPSIS
+.B tierfs
+.RB [ \-config
+.IR path ]
+.RB [ \-version ]
+.RB [ \-help ]
+.
+.SH DESCRIPTION
+.B tierfs
+mounts a FUSE filesystem at a configured path and transparently moves files
+across N storage tiers according to a declarative TOML policy.
+Applications read and write a single mount point;
+.B tierfs
+handles placement, async replication, digest verification, and eviction invisibly.
+.PP
+Files are always written to the hottest tier (priority 0).
+An async replication worker pool copies files to colder tiers after write.
+An eviction loop removes files from a tier once a verified copy exists on a
+colder tier and the configured age has elapsed.
+Cold\-tier reads are served by staging a temporary local copy;
+promote\-on\-read can automatically bring frequently re\-accessed cold files
+back to a hot tier.
+.PP
+.B tierfs
+is designed for media\-heavy workloads such as Frigate NVR, Immich, and
+general surveillance or media server deployments, but is application\-agnostic.
+Any process that writes files to the mount point works with
+.B tierfs
+without modification.
+.
+.SH OPTIONS
+.TP
+.BI \-config " path"
+Path to the TOML configuration file.
+Default:
+.IR /etc/tierfs/tierfs.toml .
+The file is read once at startup; changes require a restart.
+.TP
+.B \-version
+Print the version string and exit.
+.TP
+.B \-help
+Print a usage summary and exit.
+.
+.SH CONFIGURATION
+.B tierfs
+is configured entirely via its TOML configuration file.
+The file specifies the mount point, metadata database path,
+replication and eviction parameters, observability settings,
+backend storage targets, tier definitions, and policy rules.
+.PP
+See
+.BR tierfs.toml (5)
+and
+.I docs/CONFIGURATION.md
+for the complete field reference and example configurations.
+.PP
+Key stanza types:
+.TP
+.B [mount]
+Mount point path, SQLite metadata database path, and staging directory.
+.TP
+.B [replication]
+Worker count, retry parameters, and post\-copy verification mode
+.RB ( none ,
+.BR size ,
+or
+.BR digest ).
+.TP
+.B [eviction]
+Tick interval, capacity threshold, and headroom watermark.
+.TP
+.B [observability]
+Structured JSON logging (zap + lumberjack rotation), Prometheus metrics,
+and OpenTelemetry OTLP tracing.
+.TP
+.B [[backend]]
+Named storage target with URI
+.RB ( file:///path
+or
+.BR s3://bucket/prefix )
+and optional S3 endpoint and credential fields.
+.TP
+.B [[tier]]
+Named tier referencing a backend, with priority (0 = hottest) and capacity.
+.TP
+.B [[rule]]
+Glob\-matched policy rule with eviction schedule, pin\-tier, promote\-on\-read,
+and replication flags.
+.
+.SH TIER POLICY
+Rules are evaluated in declaration order; the first matching rule governs a file.
+A catch\-all rule
+.RB ( match\ =\ "**" )
+at the end of the rules list is required.
+.PP
+.B Eviction schedule
+.RS
+Each rule may specify an
+.I evict_schedule
+list of steps of the form
+.RI { after\ =\ "24h" ,\ to\ =\ "tier1" }.
+A file is evicted from its current tier to the destination tier when:
+(a) the file has resided on the current tier for at least
+.I after
+duration; and
+(b) a digest\-verified copy exists on the destination tier.
+Steps are evaluated independently on each evictor tick.
+.RE
+.PP
+.B Pin tier
+.RS
+A rule with
+.I pin_tier
+set exempts matching files from auto\-eviction from that tier.
+The file may still be deleted via
+.IR unlink (2).
+.RE
+.PP
+.B Promote on read
+.RS
+When a cold\-tier file is accessed and the matching rule specifies
+.IR promote_on_read ,
+a copy job is enqueued to bring the file back to the named tier.
+This enables access\-based caching.
+.RE
+.PP
+.B Capacity pressure
+.RS
+When a tier's metadata\-tracked usage exceeds
+.I capacity_threshold
+(default 0.85), the evictor evicts the oldest synced files on that tier
+(regardless of age schedule) until usage falls below
+.I capacity_headroom
+(default 0.70).
+Eviction only proceeds if a verified copy exists on a colder tier.
+.RE
+.
+.SH BACKENDS
+.SS file:// \(em Local and Network Filesystem Backend
+.nf
+uri = "file:///data/ssd/cctv"
+uri = "file:///mnt/nas/cctv"      # NFS or SMB mount
+.fi
+.PP
+Files are stored in a directory tree rooted at the given path, mirroring
+the relative paths of the virtual filesystem.
+Writes use atomic rename (temp file in same directory + \fBrename\fR(2)) to
+prevent readers from seeing partial files.
+Local file backends support zero\-copy FUSE reads via kernel page cache
+(the FUSE layer opens the real file descriptor directly).
+.SS s3:// \(em S3\-Compatible Object Storage Backend
+.nf
+uri        = "s3://bucket/optional\-prefix"
+endpoint   = "https://minio.lan:9000"    # omit for AWS S3
+region     = "us\-east\-1"
+path_style = true                        # required for MinIO, Ceph
+.fi
+.PP
+Credentials are read from environment variables
+.B AWS_ACCESS_KEY_ID
+and
+.B AWS_SECRET_ACCESS_KEY
+(preferred), or from the
+.I access_key
+and
+.I secret_key
+config fields, or from the AWS shared credentials file.
+Multipart upload is used for files larger than 16\ MiB with 4 concurrent parts.
+S3 backends do not support zero\-copy FUSE reads; cold reads are staged to
+.IR stage_dir .
+.
+.SH SIGNALS
+.TP
+.BR SIGTERM ", " SIGINT
+Initiate graceful shutdown:
+unmount the FUSE filesystem,
+drain in\-flight FUSE operations,
+stop replication and eviction workers (waits for current jobs to complete),
+flush observability (metrics server, tracer),
+close the SQLite database (WAL checkpoint).
+Typical shutdown time is under 5 seconds; allow up to 60 seconds for large
+in\-flight copies to complete.
+.TP
+.B SIGKILL
+Immediate process termination.
+SQLite WAL mode provides crash recovery; metadata will be consistent on restart.
+In\-flight writes may leave files in
+.I StateWriting
+in metadata; treat them as corrupted.
+.
+.SH EXIT STATUS
+.TP
+.B 0
+Clean shutdown after successful
+.BR SIGTERM / SIGINT .
+.TP
+.B 1
+Configuration error (missing required field, invalid value, undefined tier
+reference, missing catch\-all rule).
+The specific error is printed to stderr.
+.TP
+.B 2
+Mount error: FUSE mount failed (permissions, missing
+.IR /dev/fuse ,
+mount point not empty, or
+.B fusermount3
+not installed).
+.TP
+.B 3
+Runtime error: metadata store failed to open, observability initialisation
+failed, or a required backend is unreachable at startup.
+.
+.SH ENVIRONMENT
+.TP
+.B AWS_ACCESS_KEY_ID
+S3 access key ID.
+Takes precedence over the
+.I access_key
+config field.
+.TP
+.B AWS_SECRET_ACCESS_KEY
+S3 secret access key.
+Takes precedence over the
+.I secret_key
+config field.
+.TP
+.B AWS_REGION
+S3 region override.
+Takes precedence over the
+.I region
+config field.
+.TP
+.B AWS_ENDPOINT_URL
+S3 endpoint override (AWS SDK v2 standard environment variable).
+Takes precedence over the
+.I endpoint
+config field.
+.TP
+.B B2_APPLICATION_KEY_ID
+Backblaze B2 key ID.
+Use as
+.B AWS_ACCESS_KEY_ID
+when targeting a Backblaze S3\-compatible endpoint.
+.TP
+.B B2_APPLICATION_KEY
+Backblaze B2 application key.
+Use as
+.B AWS_SECRET_ACCESS_KEY
+when targeting a Backblaze S3\-compatible endpoint.
+.
+.SH FILES
+.TP
+.I /etc/tierfs/tierfs.toml
+Default configuration file location.
+Override with
+.BR \-config .
+.TP
+.I /var/lib/tierfs/meta.db
+Default SQLite metadata database.
+Configurable via
+.I [mount] meta_db
+in the config file.
+Contains the
+.I files
+and
+.I file_tiers
+tables.
+Back up with
+.nf
+sqlite3 /var/lib/tierfs/meta.db ".backup /backup/meta.db"
+.fi
+.TP
+.I /tmp/tierfs-stage
+Default staging directory for remote\-tier reads.
+Configurable via
+.I [mount] stage_dir
+in the config file.
+Temporary staged files are removed after the FUSE file handle is closed.
+.TP
+.I /var/log/tierfs/tierfs.log
+Log file if a file sink is configured in
+.IR [observability.logging] .
+Not created by default (stdout only).
+.
+.SH EXAMPLES
+.SS 1. Mount with the default configuration file
+.nf
+tierfs
+.fi
+.PP
+Reads
+.IR /etc/tierfs/tierfs.toml ,
+mounts at the path specified by
+.IR [mount] path ,
+and runs until
+.BR SIGTERM .
+.
+.SS 2. Mount with a custom configuration path
+.nf
+tierfs \-config /home/user/my\-tierfs.toml
+.fi
+.
+.SS 3. Run in the foreground with debug logging
+Override the log level in the config file for a debug session:
+.nf
+# In tierfs.toml:
+[observability.logging]
+level  = "debug"
+format = "console"   # human\-readable for interactive use
+
+tierfs \-config /etc/tierfs/tierfs.toml
+# Press Ctrl\-C (SIGINT) to unmount and exit cleanly
+.fi
+.
+.SS 4. Docker run (Frigate NVR alongside)
+.nf
+docker run \-d \e
+  \-\-name tierfs \e
+  \-\-cap\-add SYS_ADMIN \e
+  \-\-device /dev/fuse \e
+  \-\-security\-opt apparmor:unconfined \e
+  \-v /etc/tierfs/tierfs.toml:/etc/tierfs/tierfs.toml:ro \e
+  \-v /data/ssd/cctv:/data/tier0 \e
+  \-v /mnt/nas/cctv:/data/tier1 \e
+  \-v /var/lib/tierfs:/var/lib/tierfs \e
+  \-v /share/CCTV:/share/CCTV:shared \e
+  \-p 9100:9100 \e
+  \-e AWS_ACCESS_KEY_ID \e
+  \-e AWS_SECRET_ACCESS_KEY \e
+  ghcr.io/mikey-austin/tierfs:latest
+.fi
+.
+.SS 5. Run once for testing with systemd\-run
+.nf
+sudo systemd\-run \e
+  \-\-unit=tierfs\-test \e
+  \-\-property=AmbientCapabilities=CAP_SYS_ADMIN \e
+  \-\-property=DeviceAllow='/dev/fuse rw' \e
+  /usr/local/bin/tierfs \-config /etc/tierfs/tierfs.toml
+.fi
+.PP
+Stop and clean up with:
+.nf
+sudo systemctl stop tierfs\-test
+.fi
+.
+.SH DIAGNOSTICS
+.TP
+.B "mount: failed to mount: permission denied"
+The process does not have
+.B CAP_SYS_ADMIN
+or
+.I /dev/fuse
+is not accessible.
+Add
+.I user_allow_other
+to
+.I /etc/fuse.conf
+and run as the fuse group, or run as root.
+.TP
+.B "load config: open /etc/tierfs/tierfs.toml: no such file or directory"
+The configuration file does not exist at the default path.
+Create it or specify a path with
+.BR \-config .
+.TP
+.B "tier \(dqtier1\(dq references unknown backend \(dqnas\(dq"
+A
+.B [[tier]]
+block references a
+.I backend
+name that has no matching
+.B [[backend]]
+block.
+Add the
+.B [[backend]]
+definition.
+.TP
+.B "no catch\-all rule found"
+The
+.B [[rule]]
+list does not contain a rule with
+.IR "match = \"**\"" .
+Add one as the last rule.
+.TP
+.B "database is locked"
+Another
+.B tierfs
+process (or a zombie) has the SQLite database open.
+Check with
+.B fuser
+.IR /var/lib/tierfs/meta.db .
+.TP
+.B "digest verification failed: want <hash> got <hash>"
+The copy to the destination tier produced a different digest than the source.
+The destination copy has been deleted.
+The job will be retried.
+If this recurs, investigate the destination backend for corruption or truncation.
+.
+.SH SEE ALSO
+.BR tierfs.toml (5),
+.BR fuse (8),
+.BR fusermount3 (1),
+.BR sqlite3 (1),
+.BR systemd.service (5)
+.PP
+Full documentation:
+.UR https://github.com/mikey-austin/tierfs
+.UE
+.
+.SH BUGS
+Report bugs at:
+.UR https://github.com/mikey-austin/tierfs/issues
+.UE
+.PP
+Security vulnerabilities: email
+.MT security@PLACEHOLDER
+.ME
+before opening a public issue.
+.
+.SH AUTHORS
+mikey-austin and contributors.
+.PP
+See
+.I CONTRIBUTING.md
+for how to contribute.

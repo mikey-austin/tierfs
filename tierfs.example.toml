@@ -1,0 +1,163 @@
+# tierfs.toml — full reference configuration
+# All fields shown with their defaults where applicable.
+
+# ── Mount ─────────────────────────────────────────────────────────────────────
+
+[mount]
+path      = "/share/CCTV"          # FUSE mount point; must exist
+meta_db   = "/var/lib/tierfs/meta.db"
+stage_dir = "/tmp/tierfs-stage"    # scratch area for reads from remote tiers
+
+# ── Replication ───────────────────────────────────────────────────────────────
+
+[replication]
+workers          = 4
+retry_interval   = "30s"
+max_retries      = 5
+verify           = "digest"          # none | size | digest
+# write_quiescence: minimum idle time after the last write handle closes before
+# a file is eligible for replication. Protects against copying incomplete files
+# when an application writes in multiple phases (e.g. a muxer that re-opens a
+# segment to add a subtitle track a few seconds after the initial write).
+# Set to cover the longest expected inter-write gap for your workload.
+# Frigate: "0s" is safe (segments are complete on close).
+# Immich original ingest: "5s" covers thumbnail generation touching the file.
+# Default: "0s" (disabled — only open handles block replication).
+write_quiescence = "0s"
+
+# ── Eviction ──────────────────────────────────────────────────────────────────
+
+[eviction]
+check_interval     = "5m"
+capacity_threshold = 0.85          # start pressure eviction above this fraction
+capacity_headroom  = 0.70          # evict until usage falls to this fraction
+
+# ── Observability ─────────────────────────────────────────────────────────────
+
+[observability.logging]
+# level: debug | info | warn | error
+level       = "info"
+# format: json (production) | console (development / human-readable)
+format      = "json"
+# output_paths: "stdout", "stderr", or absolute file paths.
+# File sinks are automatically rotated via lumberjack.
+output_paths = ["stdout", "/var/log/tierfs/tierfs.log"]
+# development: enables coloured console output, caller info, and warn-level stacks.
+development = false
+
+[observability.logging.rotation]
+max_size_mb  = 100    # rotate when log file reaches this size
+max_backups  = 5      # keep this many rotated files
+max_age_days = 30     # delete rotated files older than this
+compress     = true   # gzip rotated files
+
+[observability.metrics]
+# Prometheus metrics exposed on /metrics.
+enabled = true
+address = ":9100"
+path    = "/metrics"
+
+# Example scrape config for Prometheus / Grafana Agent:
+#   - job_name: tierfs
+#     static_configs:
+#       - targets: ["localhost:9100"]
+
+[observability.tracing]
+# OpenTelemetry OTLP traces (Jaeger, Grafana Tempo, etc.).
+enabled      = false
+endpoint     = "localhost:4317"   # OTLP gRPC endpoint
+service_name = "tierfs"
+sample_rate  = 1.0                # 1.0 = 100%; reduce for high-volume production
+insecure     = true               # skip TLS for local collectors
+
+# ── Backends ──────────────────────────────────────────────────────────────────
+
+[[backend]]
+name = "ssd"
+uri  = "file:///local/CCTV"
+
+[[backend]]
+name = "nas"
+uri  = "file:///mnt/nas/CCTV"   # NFS/SMB mount managed by the OS
+
+[[backend]]
+name       = "minio"
+uri        = "s3://nvr-archive/cctv"
+endpoint   = "https://minio.lan:9000"
+region     = "us-east-1"
+path_style = true               # required for MinIO and Ceph
+
+[[backend]]
+name     = "backblaze"
+uri      = "s3://my-b2-bucket/cold-cctv"
+endpoint = "https://s3.us-west-004.backblazeb2.com"
+region   = "us-west-004"
+# Credentials are read from environment variables:
+#   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+#   (or B2_APPLICATION_KEY_ID / B2_APPLICATION_KEY for Backblaze)
+
+# ── Tiers ─────────────────────────────────────────────────────────────────────
+
+[[tier]]
+name     = "tier0"
+backend  = "ssd"
+capacity = "500GiB"
+priority = 0            # lower priority number = hotter; writes always land here
+
+[[tier]]
+name     = "tier1"
+backend  = "nas"
+capacity = "8TiB"
+priority = 1
+
+[[tier]]
+name     = "tier2"
+backend  = "minio"
+capacity = "unlimited"
+priority = 2
+
+[[tier]]
+name     = "tier3"
+backend  = "backblaze"
+capacity = "unlimited"
+priority = 3
+
+# ── Rules ─────────────────────────────────────────────────────────────────────
+# Rules are evaluated top-to-bottom; first match wins.
+# The last rule MUST be a catch-all with match = "**".
+
+[[rule]]
+name  = "thumbnails"
+match = "thumbnails/**"
+# Thumbnails are tiny write-once files; evict to NAS immediately after sync.
+evict_schedule  = [{after = "0s", to = "tier1"}]
+promote_on_read = false
+
+[[rule]]
+name  = "recordings"
+match = "recordings/**"
+# Recent recordings: on NAS after 24h, cold storage after 30 days.
+evict_schedule = [
+  {after = "24h",   to = "tier1"},
+  {after = "720h",  to = "tier2"},
+  {after = "8760h", to = "tier3"},
+]
+promote_on_read = false
+
+[[rule]]
+name  = "clips"
+match = "clips/**"
+# User-triggered clips: keep hot for 7 days; promote to SSD on re-access.
+evict_schedule  = [{after = "168h", to = "tier1"}]
+promote_on_read = "tier0"
+
+[[rule]]
+name     = "exports"
+match    = "exports/**"
+pin_tier = "tier0"      # never auto-evict; user manages exports explicitly
+
+[[rule]]
+name           = "default"
+match          = "**"
+evict_schedule = [{after = "48h", to = "tier1"}]
+promote_on_read = false
