@@ -220,12 +220,18 @@ func (fs *TierFS) Create(name string, flags uint32, mode uint32, ctx *gofuse.Con
 		return nil, gofuse.EIO
 	}
 
-	// For file backends, open directly in the backend's local directory.
-	type fileCreator interface {
-		CreateFile(relPath string, mode os.FileMode) (*os.File, error)
-	}
-	if fc, ok := backend.(fileCreator); ok {
-		f, ferr := fc.CreateFile(name, os.FileMode(mode))
+	// For local backends, create the file directly in the backend's directory.
+	// This avoids the staging+async-push path so that the file is immediately
+	// visible on disk — required for ffmpeg -movflags +faststart which
+	// closes then immediately re-opens the output file.
+	// We use LocalPath (which works through the observability decorator)
+	// instead of the fileCreator interface which the decorator doesn't expose.
+	if localPath, ok := backend.LocalPath(name); ok {
+		if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+			fs.log.Error("create parent dirs", zap.String("path", localPath), zap.Error(err))
+			return nil, gofuse.EIO
+		}
+		f, ferr := os.OpenFile(localPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(mode))
 		if ferr != nil {
 			fs.log.Error("create file", zap.String("name", name), zap.Error(ferr))
 			return nil, gofuse.EIO
