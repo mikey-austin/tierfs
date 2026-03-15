@@ -17,8 +17,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mikey-austin/tierfs/internal/domain"
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/mikey-austin/tierfs/internal/domain"
 )
 
 // Store implements domain.MetadataStore.

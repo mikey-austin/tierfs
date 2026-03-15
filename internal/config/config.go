@@ -33,16 +33,16 @@ type MountConfig struct {
 }
 
 type ReplicationConfig struct {
-	Workers         int    `toml:"workers"`
-	RetryInterval   string `toml:"retry_interval"`
-	MaxRetries      int    `toml:"max_retries"`
-	Verify          string `toml:"verify"`           // none | size | digest
-	WriteQuiescence string `toml:"write_quiescence"` // min idle time after last write close before replication
-	SweepInterval   string `toml:"sweep_interval"`   // how often to re-enqueue StateLocal files
-	BackendTimeout  string `toml:"backend_timeout"`  // max time for a single replication backend call
-	BandwidthLimit       string `toml:"bandwidth_limit"`        // e.g. "50MiB/s", "" = unlimited
-	HealthCheckInterval  string `toml:"health_check_interval"`  // how often to probe backends; default "30s"
-	HealthCheckTimeout   string `toml:"health_check_timeout"`   // probe timeout per backend; default "10s"
+	Workers             int    `toml:"workers"`
+	RetryInterval       string `toml:"retry_interval"`
+	MaxRetries          int    `toml:"max_retries"`
+	Verify              string `toml:"verify"`                // none | size | digest
+	WriteQuiescence     string `toml:"write_quiescence"`      // min idle time after last write close before replication
+	SweepInterval       string `toml:"sweep_interval"`        // how often to re-enqueue StateLocal files
+	BackendTimeout      string `toml:"backend_timeout"`       // max time for a single replication backend call
+	BandwidthLimit      string `toml:"bandwidth_limit"`       // e.g. "50MiB/s", "" = unlimited
+	HealthCheckInterval string `toml:"health_check_interval"` // how often to probe backends; default "30s"
+	HealthCheckTimeout  string `toml:"health_check_timeout"`  // probe timeout per backend; default "10s"
 }
 
 type EvictionConfig struct {
@@ -186,13 +186,13 @@ type Resolved struct {
 }
 
 type ReplicationResolved struct {
-	Workers         int
-	RetryInterval   time.Duration
-	MaxRetries      int
-	Verify          string
-	WriteQuiescence time.Duration
-	SweepInterval   time.Duration
-	BackendTimeout  time.Duration
+	Workers             int
+	RetryInterval       time.Duration
+	MaxRetries          int
+	Verify              string
+	WriteQuiescence     time.Duration
+	SweepInterval       time.Duration
+	BackendTimeout      time.Duration
 	BandwidthLimit      int64 // bytes per second, 0 = unlimited
 	HealthCheckInterval time.Duration
 	HealthCheckTimeout  time.Duration

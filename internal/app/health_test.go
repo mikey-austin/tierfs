@@ -19,14 +19,22 @@ import (
 // errorBackend always returns an error on Stat (simulates unreachable backend).
 type errorBackend struct{ name string }
 
-func (e *errorBackend) Scheme() string                                                    { return "err" }
-func (e *errorBackend) URI(p string) string                                               { return "err://" + p }
-func (e *errorBackend) LocalPath(_ string) (string, bool)                                 { return "", false }
-func (e *errorBackend) Put(_ context.Context, _ string, r io.Reader, _ int64) error       { return fmt.Errorf("unreachable") }
-func (e *errorBackend) Get(_ context.Context, _ string) (io.ReadCloser, int64, error)     { return nil, 0, fmt.Errorf("unreachable") }
-func (e *errorBackend) Stat(_ context.Context, _ string) (*domain.FileInfo, error)        { return nil, fmt.Errorf("connection refused") }
-func (e *errorBackend) Delete(_ context.Context, _ string) error                          { return fmt.Errorf("unreachable") }
-func (e *errorBackend) List(_ context.Context, _ string) ([]domain.FileInfo, error)       { return nil, fmt.Errorf("unreachable") }
+func (e *errorBackend) Scheme() string                    { return "err" }
+func (e *errorBackend) URI(p string) string               { return "err://" + p }
+func (e *errorBackend) LocalPath(_ string) (string, bool) { return "", false }
+func (e *errorBackend) Put(_ context.Context, _ string, r io.Reader, _ int64) error {
+	return fmt.Errorf("unreachable")
+}
+func (e *errorBackend) Get(_ context.Context, _ string) (io.ReadCloser, int64, error) {
+	return nil, 0, fmt.Errorf("unreachable")
+}
+func (e *errorBackend) Stat(_ context.Context, _ string) (*domain.FileInfo, error) {
+	return nil, fmt.Errorf("connection refused")
+}
+func (e *errorBackend) Delete(_ context.Context, _ string) error { return fmt.Errorf("unreachable") }
+func (e *errorBackend) List(_ context.Context, _ string) ([]domain.FileInfo, error) {
+	return nil, fmt.Errorf("unreachable")
+}
 
 // swappableBackend delegates to an inner backend that can be swapped safely.
 type swappableBackend struct {
@@ -34,15 +42,29 @@ type swappableBackend struct {
 	current domain.Backend
 }
 
-func (s *swappableBackend) inner() domain.Backend { s.mu.RLock(); defer s.mu.RUnlock(); return s.current }
-func (s *swappableBackend) Scheme() string        { return s.inner().Scheme() }
-func (s *swappableBackend) URI(p string) string    { return s.inner().URI(p) }
+func (s *swappableBackend) inner() domain.Backend {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.current
+}
+func (s *swappableBackend) Scheme() string                    { return s.inner().Scheme() }
+func (s *swappableBackend) URI(p string) string               { return s.inner().URI(p) }
 func (s *swappableBackend) LocalPath(p string) (string, bool) { return s.inner().LocalPath(p) }
-func (s *swappableBackend) Put(ctx context.Context, p string, r io.Reader, sz int64) error { return s.inner().Put(ctx, p, r, sz) }
-func (s *swappableBackend) Get(ctx context.Context, p string) (io.ReadCloser, int64, error) { return s.inner().Get(ctx, p) }
-func (s *swappableBackend) Stat(ctx context.Context, p string) (*domain.FileInfo, error) { return s.inner().Stat(ctx, p) }
-func (s *swappableBackend) Delete(ctx context.Context, p string) error { return s.inner().Delete(ctx, p) }
-func (s *swappableBackend) List(ctx context.Context, p string) ([]domain.FileInfo, error) { return s.inner().List(ctx, p) }
+func (s *swappableBackend) Put(ctx context.Context, p string, r io.Reader, sz int64) error {
+	return s.inner().Put(ctx, p, r, sz)
+}
+func (s *swappableBackend) Get(ctx context.Context, p string) (io.ReadCloser, int64, error) {
+	return s.inner().Get(ctx, p)
+}
+func (s *swappableBackend) Stat(ctx context.Context, p string) (*domain.FileInfo, error) {
+	return s.inner().Stat(ctx, p)
+}
+func (s *swappableBackend) Delete(ctx context.Context, p string) error {
+	return s.inner().Delete(ctx, p)
+}
+func (s *swappableBackend) List(ctx context.Context, p string) ([]domain.FileInfo, error) {
+	return s.inner().List(ctx, p)
+}
 
 func TestBackendHealth_HealthyBackend(t *testing.T) {
 	src := newMemBackend("tier0")

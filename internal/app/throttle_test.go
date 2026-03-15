@@ -45,7 +45,7 @@ func TestThrottledReader_UnlimitedPassthrough(t *testing.T) {
 
 func TestThrottledReader_RespectsContext(t *testing.T) {
 	data := make([]byte, 8192)
-	limiter := newTokenBucket(100) // Very slow: 100 bytes/s
+	limiter := newTokenBucket(100)       // Very slow: 100 bytes/s
 	limiter.take(int(limiter.maxTokens)) // drain burst
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
@@ -58,7 +58,7 @@ func TestThrottledReader_RespectsContext(t *testing.T) {
 }
 
 func TestTokenBucket_SharedAcrossReaders(t *testing.T) {
-	limiter := newTokenBucket(2048) // 2 KiB/s shared
+	limiter := newTokenBucket(2048)      // 2 KiB/s shared
 	limiter.take(int(limiter.maxTokens)) // drain burst
 
 	data := make([]byte, 2048) // Each reader gets 2 KiB
