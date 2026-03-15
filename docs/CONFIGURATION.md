@@ -47,13 +47,16 @@ stage_dir = "/tmp/tierfs-stage"
 
 Controls the async worker pool that copies files between tiers after a write.
 
-| Field              | Type     | Default    | Required | Description                                                                                                                                                                   |
-|--------------------|----------|------------|----------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `workers`          | int      | `4`        | no       | Number of concurrent copy goroutines. Each worker holds one source `Get()` stream and one destination `Put()` stream open simultaneously. Range: 1–64.                        |
-| `retry_interval`   | duration | `"30s"`    | no       | How long to wait before retrying a failed copy or a write-active delay. No exponential backoff.                                                                               |
-| `max_retries`      | int      | `5`        | no       | Maximum number of attempts per job. Set to `0` for infinite retries. After exhausting retries the job is dropped and an error is logged; the file remains on the source tier. |
-| `verify`           | string   | `"digest"` | no       | Post-copy verification mode. One of `"none"`, `"size"`, or `"digest"`. See below.                                                                                             |
-| `write_quiescence` | duration | `"0s"`     | no       | Minimum idle time after the last write handle closes before a file is eligible for replication. See [Write Safety](#write-safety) below.                                      |
+| Field                    | Type     | Default    | Required | Description                                                                                                                                                                   |
+|--------------------------|----------|------------|----------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `workers`                | int      | `4`        | no       | Number of concurrent copy goroutines. Each worker holds one source `Get()` stream and one destination `Put()` stream open simultaneously. Range: 1–64.                        |
+| `retry_interval`         | duration | `"30s"`    | no       | How long to wait before retrying a failed copy or a write-active delay. No exponential backoff.                                                                               |
+| `max_retries`            | int      | `5`        | no       | Maximum number of attempts per job. Set to `0` for infinite retries. After exhausting retries the job is dropped and an error is logged; the file remains on the source tier. |
+| `verify`                 | string   | `"digest"` | no       | Post-copy verification mode. One of `"none"`, `"size"`, or `"digest"`. See below.                                                                                             |
+| `write_quiescence`       | duration | `"0s"`     | no       | Minimum idle time after the last write handle closes before a file is eligible for replication. See [Write Safety](#write-safety) below.                                      |
+| `bandwidth_limit`        | string   | `""`       | no       | Global rate limit for replication uploads. Shared across all workers. Examples: `"50MiB/s"`, `"100MB/s"`. Empty or `"unlimited"` = no limit. See [Bandwidth Throttling](#bandwidth-throttling) below. |
+| `health_check_interval`  | duration | `"30s"`    | no       | How often to probe each backend for connectivity. See [Backend Health Checks](#backend-health-checks) below.                                                                  |
+| `health_check_timeout`   | duration | `"10s"`    | no       | Per-backend probe timeout. If a probe does not complete within this duration, the backend is marked unhealthy.                                                                 |
 
 ### Write Safety
 
@@ -96,13 +99,51 @@ The cost of a higher quiescence value is only replication latency — files wait
 
 The source digest is computed by `OnWriteComplete()` immediately after the initial write to tier0. If the source file's digest is empty (e.g. an in-flight write that was interrupted), digest verification is skipped and the copy is trusted.
 
+### Bandwidth Throttling
+
+Rate-limits replication upload bandwidth to avoid saturating your network uplink. The limit is **global** — shared across all replication workers via a token-bucket rate limiter. Individual workers block briefly after each chunk read to stay within the budget.
+
+The value uses the same unit syntax as capacity (`MiB`, `GiB`, `KB`, `MB`, etc.) with an optional trailing `/s`:
+
+| Value         | Bytes/sec         | Notes                                      |
+|---------------|-------------------|--------------------------------------------|
+| `"50MiB/s"`  | 52,428,800        | Binary mebibytes per second                |
+| `"100MB/s"`  | 100,000,000       | Decimal megabytes per second               |
+| `"1GiB/s"`   | 1,073,741,824     | Gigabit link headroom                      |
+| `""`          | unlimited         | Default — no throttle                      |
+| `"unlimited"` | unlimited         | Explicit unlimited                         |
+
+**Choosing a value:** set this to 60–80% of your uplink capacity. For a 1 Gbps link, `"100MiB/s"` leaves headroom for live camera streams. For a 100 Mbps WAN link to Backblaze, `"10MiB/s"` avoids starving other traffic.
+
+The throttle is context-aware: if the `backend_timeout` expires during a throttled upload, the copy is cancelled cleanly without blocking indefinitely.
+
+### Backend Health Checks
+
+TierFS periodically probes each backend for connectivity by calling `Stat()` on a non-existent sentinel path (`.tierfs-health-probe`). The probe result determines health:
+
+- **Healthy**: `Stat()` returns `ErrNotExist` (the backend responded — it's reachable)
+- **Unhealthy**: `Stat()` returns any other error (timeout, connection refused, auth failure)
+
+Health status is used in three places:
+
+1. **Replicator** — skips unhealthy destination backends and re-enqueues the job for later. The retry does not consume a `max_retries` count — the file will be copied once the backend recovers.
+2. **Prometheus** — `tierfs_backend_healthy` gauge (1.0 = healthy, 0.0 = unhealthy) per tier, for alerting.
+3. **Admin UI** — per-tier health indicator in the dashboard and tier detail views.
+
+Health transitions are logged: `backend unhealthy` (warn) when a probe fails, `backend recovered` (info) when it passes again.
+
+> **Fail-open:** if health checks are not configured or a tier is not tracked, the replicator assumes it is healthy. This prevents health checks from accidentally blocking replication.
+
 ```toml
 [replication]
-workers          = 4
-retry_interval   = "30s"
-max_retries      = 5
-verify           = "digest"
-write_quiescence = "5s"    # set to "0s" for pure Frigate NVR deployments
+workers                = 4
+retry_interval         = "30s"
+max_retries            = 5
+verify                 = "digest"
+write_quiescence       = "5s"    # set to "0s" for pure Frigate NVR deployments
+bandwidth_limit        = "50MiB/s"
+health_check_interval  = "30s"
+health_check_timeout   = "10s"
 ```
 
 ---
@@ -203,7 +244,7 @@ compress     = true
 
 The metrics server also serves `GET /healthz` → `200 ok` on the same address.
 
-Exposed metric names (namespace `tierfs_`): `backend_operations_total`, `backend_operation_duration_seconds`, `backend_bytes_read_total`, `backend_bytes_written_total`, `meta_operations_total`, `meta_operation_duration_seconds`, `replication_queue_depth`, `replication_jobs_total`, `replication_job_duration_seconds`, `replication_bytes_transferred_total`, `eviction_events_total`, `fuse_operations_total`, `fuse_operation_duration_seconds`, `fuse_staged_bytes_total`, `tier_file_count`, `tier_bytes_used`.
+Exposed metric names (namespace `tierfs_`): `backend_operations_total`, `backend_operation_duration_seconds`, `backend_bytes_read_total`, `backend_bytes_written_total`, `backend_healthy`, `meta_operations_total`, `meta_operation_duration_seconds`, `replication_queue_depth`, `replication_lag_seconds`, `replication_jobs_total`, `replication_job_duration_seconds`, `replication_bytes_transferred_total`, `eviction_events_total`, `fuse_operations_total`, `fuse_operation_duration_seconds`, `fuse_staged_bytes_total`, `tier_file_count`, `tier_bytes_used`.
 
 ### [observability.tracing]
 
