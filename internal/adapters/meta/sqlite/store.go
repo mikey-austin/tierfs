@@ -1,6 +1,11 @@
-// Package sqlite implements the MetadataStore port using modernc.org/sqlite
-// (pure Go, no CGO). A single write connection serialises mutations; a pool
+// Package sqlite implements the MetadataStore port using mattn/go-sqlite3
+// (CGo, real C SQLite). A single write connection serialises mutations; a pool
 // of read connections serves concurrent FUSE reads without blocking writers.
+//
+// Using CGo SQLite instead of modernc.org/sqlite because the pure-Go
+// translation uses unsafe.Pointer extensively for its internal memory
+// allocator, which can corrupt Go's heap metadata and crash the GC sweeper.
+// Real C SQLite runs in C heap space, fully isolated from Go's garbage collector.
 package sqlite
 
 import (
@@ -13,7 +18,7 @@ import (
 	"time"
 
 	"github.com/mikey-austin/tierfs/internal/domain"
-	_ "modernc.org/sqlite"
+	_ "github.com/mattn/go-sqlite3"
 )
 
 // Store implements domain.MetadataStore.
@@ -25,8 +30,8 @@ type Store struct {
 // Open opens (or creates) the SQLite database at path and applies the schema.
 func Open(path string) (*Store, error) {
 	// Allow multiple concurrent readers with WAL; one writer at a time.
-	dsn := fmt.Sprintf("file:%s?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL", path)
-	db, err := sql.Open("sqlite", dsn)
+	dsn := fmt.Sprintf("file:%s?_busy_timeout=5000&_journal_mode=WAL&_sync=NORMAL", path)
+	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite open %q: %w", path, err)
 	}

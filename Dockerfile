@@ -8,7 +8,7 @@ COPY web/admin/ .
 RUN npm run build
 
 # ── Stage 2: Build Go Binary ────────────────────────────────────────────────
-FROM golang:1.26.1-bookworm AS builder
+FROM golang:1.25.0-bookworm AS builder
 
 WORKDIR /src
 
@@ -20,7 +20,7 @@ COPY . .
 # Copy built UI assets into the embed directory.
 COPY --from=ui-builder /ui/dist/ ./web/admin/dist/
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 \
     go build -trimpath \
     -ldflags "-s -w -X main.version=$(git describe --tags --always --dirty 2>/dev/null || echo dev)" \
     -o /out/tierfs ./cmd/tierfs
