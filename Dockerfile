@@ -8,7 +8,7 @@ COPY web/admin/ .
 RUN npm run build
 
 # ── Stage 2: Build Go Binary ────────────────────────────────────────────────
-FROM golang:1.25.0-bookworm AS builder
+FROM golang:1.25.7-bookworm AS builder
 
 WORKDIR /src
 
