@@ -245,27 +245,48 @@ func (r *Replicator) process(log *zap.Logger, job CopyJob) error {
 	// ── Staleness re-check ───────────────────────────────────────────────────
 	// Re-stat the source file and compare size + mtime against what metadata
 	// recorded at OnWriteComplete time. If they differ the file has been
-	// modified since we enqueued the job (e.g. a muxer added a subtitle track,
-	// an application truncated and rewrote the file, or the FUSE open+write
-	// path was used without going through Create). Abort, let OnWriteComplete
-	// re-compute the digest and re-enqueue once the new write completes.
+	// modified since we enqueued the job.
 	const mtimePrecision = time.Microsecond
-	if file.Digest != "" {
-		liveInfo, serr := src.Stat(ctx, job.RelPath)
-		if serr == nil {
-			stale := liveInfo.Size != file.Size ||
-				liveInfo.ModTime.Truncate(mtimePrecision) != file.ModTime.Truncate(mtimePrecision)
-			if stale {
-				log.Warn("aborting replication: source file changed since enqueue",
+	liveInfo, serr := src.Stat(ctx, job.RelPath)
+	if serr == nil {
+		sizeChanged := liveInfo.Size != file.Size
+		mtimeChanged := !liveInfo.ModTime.IsZero() && !file.ModTime.IsZero() &&
+			liveInfo.ModTime.Truncate(mtimePrecision) != file.ModTime.Truncate(mtimePrecision)
+		stale := sizeChanged || mtimeChanged
+		if stale {
+			log.Warn("aborting replication: source file changed since enqueue",
+				zap.String("rel_path", job.RelPath),
+				zap.Int64("meta_size", file.Size),
+				zap.Int64("live_size", liveInfo.Size),
+				zap.Time("meta_mtime", file.ModTime),
+				zap.Time("live_mtime", liveInfo.ModTime),
+			)
+			return nil
+		}
+	}
+
+	// ── Fresh digest ─────────────────────────────────────────────────────────
+	// Recompute the digest now, after the write-guard has cleared. The digest
+	// stored by OnWriteComplete may be corrupt if it raced with a concurrent
+	// modification (e.g. ffmpeg -movflags +faststart re-opens and rewrites
+	// the file while FUSE Release is still computing the digest). At this
+	// point the quiescence window has elapsed, so the file is stable.
+	if r.cfg.Verify == "digest" {
+		if localPath, ok := src.LocalPath(job.RelPath); ok {
+			freshDigest, derr := digest.ComputeFile(localPath)
+			if derr != nil {
+				return fmt.Errorf("compute fresh digest: %w", derr)
+			}
+			if file.Digest != freshDigest {
+				log.Info("updating stale digest",
 					zap.String("rel_path", job.RelPath),
-					zap.Int64("meta_size", file.Size),
-					zap.Int64("live_size", liveInfo.Size),
-					zap.Time("meta_mtime", file.ModTime),
-					zap.Time("live_mtime", liveInfo.ModTime),
+					zap.String("old", file.Digest),
+					zap.String("new", freshDigest),
 				)
-				// Don't count as a retry failure; the file will be re-enqueued
-				// when TierService.OnWriteComplete fires for the new write.
-				return nil
+				file.Digest = freshDigest
+				if uerr := r.meta.UpsertFile(ctx, *file); uerr != nil {
+					return fmt.Errorf("update digest: %w", uerr)
+				}
 			}
 		}
 	}

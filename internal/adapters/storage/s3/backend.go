@@ -136,10 +136,11 @@ func (b *Backend) LocalPath(_ string) (string, bool) { return "", false }
 // single-part and multipart based on the configured threshold.
 func (b *Backend) Put(ctx context.Context, relPath string, r io.Reader, size int64) error {
 	_, err := b.uploader.Upload(ctx, &s3.PutObjectInput{
-		Bucket:        aws.String(b.cfg.Bucket),
-		Key:           aws.String(b.key(relPath)),
-		Body:          r,
-		ContentLength: aws.Int64(size),
+		Bucket:            aws.String(b.cfg.Bucket),
+		Key:               aws.String(b.key(relPath)),
+		Body:              r,
+		ContentLength:     aws.Int64(size),
+		ChecksumAlgorithm: types.ChecksumAlgorithmCrc32,
 	})
 	if err != nil {
 		return fmt.Errorf("s3 put %q: %w", relPath, err)

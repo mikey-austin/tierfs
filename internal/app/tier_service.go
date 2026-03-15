@@ -529,7 +529,19 @@ func (ts *TierService) requeuePending() {
 		ts.log.Error("requeue pending: list files", zap.Error(err))
 		return
 	}
+
+	// Skip files that already have a pending job to avoid flooding the queue.
+	pending := ts.replicator.PendingJobs()
+	pendingSet := make(map[string]struct{}, len(pending))
+	for _, j := range pending {
+		pendingSet[j.RelPath] = struct{}{}
+	}
+
+	var enqueued int
 	for _, f := range files {
+		if _, already := pendingSet[f.RelPath]; already {
+			continue
+		}
 		rule, err := ts.cfg.Policy.Match(f.RelPath)
 		if err != nil || !rule.Replicate {
 			continue
@@ -541,11 +553,16 @@ func (ts *TierService) requeuePending() {
 					FromTier: f.CurrentTier,
 					ToTier:   step.ToTier,
 				})
+				enqueued++
 				break
 			}
 		}
 	}
-	ts.log.Info("requeued pending replication jobs", zap.Int("count", len(files)))
+	ts.log.Info("requeued pending replication jobs",
+		zap.Int("awaiting", len(files)),
+		zap.Int("enqueued", enqueued),
+		zap.Int("skipped_already_pending", len(files)-enqueued),
+	)
 }
 
 // BuildBackend creates a domain.Backend from a BackendConfig URI.
