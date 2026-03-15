@@ -948,4 +948,3 @@ evict_schedule = [{after = "0s", to = "tier1"}]
 	assert.Equal(t, int64(initialCount), depth,
 		"queue depth should reflect the manually enqueued job")
 }
-
