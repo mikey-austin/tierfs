@@ -161,6 +161,13 @@ func (o *ObservableMetaStore) FilesAwaitingReplication(ctx context.Context) ([]d
 	return files, err
 }
 
+func (o *ObservableMetaStore) OldestAwaitingReplication(ctx context.Context) (time.Time, error) {
+	ctx, done := o.observe(ctx, "OldestAwaitingReplication")
+	t, err := o.inner.OldestAwaitingReplication(ctx)
+	done(err)
+	return t, err
+}
+
 func (o *ObservableMetaStore) EvictionCandidates(ctx context.Context, tierName string, olderThan time.Time) ([]domain.File, error) {
 	ctx, done := o.observe(ctx, "EvictionCandidates")
 	files, err := o.inner.EvictionCandidates(ctx, tierName, olderThan)

@@ -24,6 +24,16 @@ verify           = "digest"          # none | size | digest
 # Immich original ingest: "5s" covers thumbnail generation touching the file.
 # Default: "0s" (disabled — only open handles block replication).
 write_quiescence = "0s"
+# bandwidth_limit: rate-limit replication uploads to avoid saturating your uplink.
+# Applies as a global limit shared across all replication workers.
+# Examples: "50MiB/s", "100MB/s", "unlimited" (default).
+# bandwidth_limit = "50MiB/s"
+# health_check_interval: how often to probe each backend for connectivity.
+# A backend that fails its probe is marked unhealthy and the replicator
+# skips it until the next successful probe.
+# health_check_interval = "30s"
+# health_check_timeout: per-backend probe timeout.
+# health_check_timeout = "10s"
 
 # ── Eviction ──────────────────────────────────────────────────────────────────
 

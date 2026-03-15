@@ -109,6 +109,8 @@ func run(cfgPath string) error {
 	stager := app.NewStager(cfg.Mount.StageDir, log)
 	svc := app.NewTierService(cfg, meta, backends, stager, stageTTL, log)
 	svc.Replicator().SetRegistry(obs.Metrics)
+	svc.SetRegistry(obs.Metrics)
+	svc.Health().SetRegistry(obs.Metrics)
 	svc.Start()
 	defer svc.Stop()
 

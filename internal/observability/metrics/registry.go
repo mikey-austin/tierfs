@@ -39,6 +39,8 @@ type Registry struct {
 
 	// ReplicationQueueDepth is the current number of pending copy jobs.
 	ReplicationQueueDepth prometheus.Gauge
+	// ReplicationLagSeconds is the age of the oldest file awaiting replication.
+	ReplicationLagSeconds prometheus.Gauge
 	// ReplicationTotal counts completed copy jobs, labelled by outcome.
 	ReplicationTotal *prometheus.CounterVec
 	// ReplicationDuration tracks time to complete a copy, labelled by tier pair.
@@ -66,6 +68,11 @@ type Registry struct {
 	TierFileCount *prometheus.GaugeVec
 	// TierBytesUsed tracks bytes consumed on each tier (from metadata).
 	TierBytesUsed *prometheus.GaugeVec
+
+	// ── Backend health ──────────────────────────────────────────────────────
+
+	// BackendHealthy is 1 if the backend is reachable, 0 if not.
+	BackendHealthy *prometheus.GaugeVec
 }
 
 // New creates a Registry with all metrics registered.
@@ -131,6 +138,12 @@ func New() *Registry {
 		Help: "Current number of pending replication jobs.",
 	})
 
+	r.ReplicationLagSeconds = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: ns, Subsystem: "replication",
+		Name: "lag_seconds",
+		Help: "Age in seconds of the oldest file awaiting replication.",
+	})
+
 	r.ReplicationTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: ns, Subsystem: "replication",
 		Name: "jobs_total",
@@ -189,11 +202,18 @@ func New() *Registry {
 	}, []string{"tier"})
 	_ = sizeBuckets // used by histogram variants if added later
 
+	r.BackendHealthy = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: ns, Subsystem: "backend",
+		Name: "healthy",
+		Help: "Whether each backend is reachable (1 = healthy, 0 = unhealthy).",
+	}, []string{"tier"})
+
 	prom.MustRegister(
 		r.BackendOps, r.BackendDuration, r.BackendBytesRead, r.BackendBytesWritten,
 		r.MetaOps, r.MetaDuration,
-		r.ReplicationQueueDepth, r.ReplicationTotal, r.ReplicationDuration, r.ReplicationBytes,
+		r.ReplicationQueueDepth, r.ReplicationLagSeconds, r.ReplicationTotal, r.ReplicationDuration, r.ReplicationBytes,
 		r.EvictionTotal,
+		r.BackendHealthy,
 		r.FuseOps, r.FuseDuration, r.FuseStagedBytes,
 		r.TierFileCount, r.TierBytesUsed,
 	)

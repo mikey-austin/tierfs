@@ -35,6 +35,7 @@ type ReplicatorConfig struct {
 	Verify         string        // "none" | "size" | "digest"
 	BackendTimeout time.Duration // max time for a single replication operation
 	WriteGuard     *WriteGuard   // nil = no guard (for tests that don't need it)
+	BandwidthLimit int64         // bytes per second, 0 = unlimited
 }
 
 // TierLookup resolves a tier name to its Backend. Implemented by TierService.
@@ -45,13 +46,14 @@ type TierLookup interface {
 // Replicator manages an async worker pool that copies files between tiers,
 // then verifies the copy and updates the metadata store.
 type Replicator struct {
-	cfg   ReplicatorConfig
-	meta  domain.MetadataStore
-	tiers TierLookup
-	log   *zap.Logger
-	queue chan CopyJob
-	wg    sync.WaitGroup
-	stop  chan struct{}
+	cfg     ReplicatorConfig
+	meta    domain.MetadataStore
+	tiers   TierLookup
+	log     *zap.Logger
+	queue   chan CopyJob
+	wg      sync.WaitGroup
+	stop    chan struct{}
+	limiter *tokenBucket // shared bandwidth limiter; nil = unlimited
 
 	// Metrics (read with atomic, written under the worker goroutines).
 	totalCopied atomic.Int64
@@ -64,11 +66,14 @@ type Replicator struct {
 
 	// Prometheus metrics registry (nil-safe; nil in tests).
 	reg *metrics.Registry
+
+	// Backend health checker (nil-safe).
+	health *BackendHealth
 }
 
 // NewReplicator creates a Replicator. Call Start() to begin processing.
 func NewReplicator(cfg ReplicatorConfig, meta domain.MetadataStore, tiers TierLookup, log *zap.Logger) *Replicator {
-	return &Replicator{
+	r := &Replicator{
 		cfg:         cfg,
 		meta:        meta,
 		tiers:       tiers,
@@ -77,6 +82,15 @@ func NewReplicator(cfg ReplicatorConfig, meta domain.MetadataStore, tiers TierLo
 		stop:        make(chan struct{}),
 		pendingJobs: make(map[string]*CopyJob),
 	}
+	if cfg.BandwidthLimit > 0 {
+		r.limiter = newTokenBucket(cfg.BandwidthLimit)
+	}
+	return r
+}
+
+// SetHealth wires backend health checks. Call before Start().
+func (r *Replicator) SetHealth(h *BackendHealth) {
+	r.health = h
 }
 
 // SetRegistry wires Prometheus metrics. Call before Start().
@@ -236,6 +250,22 @@ func (r *Replicator) process(log *zap.Logger, job CopyJob) error {
 		return fmt.Errorf("resolve dest backend %q: %w", job.ToTier, err)
 	}
 
+	// ── Backend health check ────────────────────────────────────────────────
+	if r.health != nil && !r.health.IsHealthy(job.ToTier) {
+		log.Warn("skipping replication: destination backend unhealthy",
+			zap.String("to_tier", job.ToTier),
+			zap.String("rel_path", job.RelPath),
+		)
+		retryTimer := time.NewTimer(r.cfg.RetryInterval)
+		select {
+		case <-r.stop:
+			retryTimer.Stop()
+		case <-retryTimer.C:
+			r.Enqueue(job) // re-enqueue without consuming a retry
+		}
+		return nil
+	}
+
 	// Fetch the metadata we recorded at OnWriteComplete time.
 	file, err := r.meta.GetFile(ctx, job.RelPath)
 	if err != nil {
@@ -320,9 +350,12 @@ func (r *Replicator) process(log *zap.Logger, job CopyJob) error {
 		streamBody io.Reader = rc
 		hasher     *digest.Hasher
 	)
+	if r.limiter != nil {
+		streamBody = newThrottledReader(ctx, streamBody, r.limiter)
+	}
 	if r.cfg.Verify == "digest" && file.Digest != "" {
 		hasher = digest.NewHasher()
-		streamBody = io.TeeReader(rc, hasher)
+		streamBody = io.TeeReader(streamBody, hasher)
 	}
 
 	if err := dst.Put(ctx, job.RelPath, streamBody, size); err != nil {

@@ -239,6 +239,20 @@ func (m *memMeta) EvictionCandidates(_ context.Context, tierName string, olderTh
 	return out, nil
 }
 
+func (m *memMeta) OldestAwaitingReplication(_ context.Context) (time.Time, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var oldest time.Time
+	for _, f := range m.files {
+		if f.State == domain.StateLocal {
+			if oldest.IsZero() || f.ModTime.Before(oldest) {
+				oldest = f.ModTime
+			}
+		}
+	}
+	return oldest, nil
+}
+
 func (m *memMeta) ListDir(_ context.Context, _ string) ([]domain.FileInfo, error) {
 	return nil, nil
 }

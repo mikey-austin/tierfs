@@ -174,6 +174,7 @@ type tierStatus struct {
 	FileCount int            `json:"fileCount"`
 	BytesUsed int64          `json:"bytesUsed"`
 	States    map[string]int `json:"states"`
+	Healthy   *bool          `json:"healthy,omitempty"`
 }
 
 type tiersResponse struct {
@@ -214,6 +215,17 @@ func (h *Handler) handleTiers(w http.ResponseWriter, _ *http.Request) {
 			ts.FileCount++
 			ts.BytesUsed += f.Size
 			ts.States[state]++
+		}
+	}
+
+	// Attach health status if available.
+	if health := h.svc.Health(); health != nil {
+		statuses := health.Statuses()
+		for name, ts := range tierMap {
+			if healthy, ok := statuses[name]; ok {
+				h := healthy
+				ts.Healthy = &h
+			}
 		}
 	}
 

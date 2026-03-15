@@ -236,6 +236,19 @@ func (s *Store) FilesAwaitingReplication(ctx context.Context) ([]domain.File, er
 	return scanFiles(rows)
 }
 
+func (s *Store) OldestAwaitingReplication(ctx context.Context) (time.Time, error) {
+	var nanos sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT MIN(mod_time) FROM files WHERE state = 'local'`).Scan(&nanos)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("oldest awaiting replication: %w", err)
+	}
+	if !nanos.Valid {
+		return time.Time{}, nil
+	}
+	return time.Unix(0, nanos.Int64), nil
+}
+
 // ── Directory listing ────────────────────────────────────────────────────────
 
 // ListDir returns the immediate children of dirPath by splitting file paths.

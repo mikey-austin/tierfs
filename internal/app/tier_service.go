@@ -16,6 +16,7 @@ import (
 	"github.com/mikey-austin/tierfs/internal/config"
 	"github.com/mikey-austin/tierfs/internal/digest"
 	"github.com/mikey-austin/tierfs/internal/domain"
+	"github.com/mikey-austin/tierfs/internal/observability/metrics"
 )
 
 // TierService is the central application service. It owns the tier registry,
@@ -31,6 +32,8 @@ type TierService struct {
 	log          *zap.Logger
 	sweepStop    chan struct{}
 	sweepDone    chan struct{}
+	reg          *metrics.Registry
+	health       *BackendHealth
 	stager       *Stager
 	stageTTL     time.Duration
 	promoteGroup singleflight.Group
@@ -65,6 +68,7 @@ func NewTierService(
 		Verify:         cfg.Replication.Verify,
 		BackendTimeout: cfg.Replication.BackendTimeout,
 		WriteGuard:     ts.guard,
+		BandwidthLimit: cfg.Replication.BandwidthLimit,
 	}
 	ts.replicator = NewReplicator(replCfg, meta, ts, log)
 
@@ -80,6 +84,12 @@ func NewTierService(
 	}
 	ts.evictor = NewEvictor(evictCfg, meta, cfg.Policy, ts.replicator, ts, ts, log)
 
+	ts.health = NewBackendHealth(tierNames, ts,
+		cfg.Replication.HealthCheckInterval,
+		cfg.Replication.HealthCheckTimeout,
+		log)
+	ts.replicator.SetHealth(ts.health)
+
 	return ts
 }
 
@@ -87,6 +97,7 @@ func NewTierService(
 func (ts *TierService) Start() {
 	ts.replicator.Start()
 	ts.evictor.Start()
+	ts.health.Start()
 	ts.log.Info("tier service started",
 		zap.Int("tiers", len(ts.cfg.Tiers)),
 		zap.Int("replication_workers", ts.cfg.Replication.Workers),
@@ -101,6 +112,7 @@ func (ts *TierService) Start() {
 func (ts *TierService) Stop() {
 	close(ts.sweepStop)
 	<-ts.sweepDone
+	ts.health.Stop()
 	ts.evictor.Stop()
 	ts.replicator.Stop()
 	ts.log.Info("tier service stopped")
@@ -366,11 +378,19 @@ func (ts *TierService) Guard() *WriteGuard { return ts.guard }
 // Replicator returns the Replicator for admin API access.
 func (ts *TierService) Replicator() *Replicator { return ts.replicator }
 
+// Health returns the BackendHealth checker for admin API and replicator use.
+func (ts *TierService) Health() *BackendHealth { return ts.health }
+
 // Config returns the resolved configuration.
 func (ts *TierService) Config() *config.Resolved { return ts.cfg }
 
 // Meta returns the metadata store.
 func (ts *TierService) Meta() domain.MetadataStore { return ts.meta }
+
+// SetRegistry stores the metrics registry for replication-lag updates.
+func (ts *TierService) SetRegistry(reg *metrics.Registry) {
+	ts.reg = reg
+}
 
 // HottestTierName returns the name of the tier with priority 0.
 func (ts *TierService) HottestTierName() string {
@@ -514,11 +534,31 @@ func (ts *TierService) sweepLoop() {
 			return
 		case <-ticker.C:
 			ts.requeuePending()
+			ts.updateReplicationLag()
 			if ts.stager != nil && ts.stageTTL > 0 {
 				ts.stager.SweepStagingDir(ts.stageTTL)
 			}
 		}
 	}
+}
+
+// updateReplicationLag queries the oldest file awaiting replication and
+// updates the Prometheus gauge with its age in seconds.
+func (ts *TierService) updateReplicationLag() {
+	if ts.reg == nil {
+		return
+	}
+	ctx := context.Background()
+	oldest, err := ts.meta.OldestAwaitingReplication(ctx)
+	if err != nil {
+		ts.log.Error("update replication lag", zap.Error(err))
+		return
+	}
+	if oldest.IsZero() {
+		ts.reg.ReplicationLagSeconds.Set(0)
+		return
+	}
+	ts.reg.ReplicationLagSeconds.Set(time.Since(oldest).Seconds())
 }
 
 // requeuePending re-enqueues files left in StateLocal from a previous run.

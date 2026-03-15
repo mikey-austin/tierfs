@@ -107,6 +107,9 @@ func (f *fakeMetaStore) FilesOnTier(_ context.Context, _ string) ([]domain.File,
 func (f *fakeMetaStore) FilesAwaitingReplication(_ context.Context) ([]domain.File, error) {
 	return nil, nil
 }
+func (f *fakeMetaStore) OldestAwaitingReplication(_ context.Context) (time.Time, error) {
+	return time.Time{}, nil
+}
 func (f *fakeMetaStore) EvictionCandidates(_ context.Context, _ string, _ time.Time) ([]domain.File, error) {
 	return nil, nil
 }

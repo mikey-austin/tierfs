@@ -40,6 +40,9 @@ type ReplicationConfig struct {
 	WriteQuiescence string `toml:"write_quiescence"` // min idle time after last write close before replication
 	SweepInterval   string `toml:"sweep_interval"`   // how often to re-enqueue StateLocal files
 	BackendTimeout  string `toml:"backend_timeout"`  // max time for a single replication backend call
+	BandwidthLimit       string `toml:"bandwidth_limit"`        // e.g. "50MiB/s", "" = unlimited
+	HealthCheckInterval  string `toml:"health_check_interval"`  // how often to probe backends; default "30s"
+	HealthCheckTimeout   string `toml:"health_check_timeout"`   // probe timeout per backend; default "10s"
 }
 
 type EvictionConfig struct {
@@ -190,6 +193,9 @@ type ReplicationResolved struct {
 	WriteQuiescence time.Duration
 	SweepInterval   time.Duration
 	BackendTimeout  time.Duration
+	BandwidthLimit      int64 // bytes per second, 0 = unlimited
+	HealthCheckInterval time.Duration
+	HealthCheckTimeout  time.Duration
 }
 
 type EvictionResolved struct {
@@ -393,14 +399,39 @@ func (cfg *Config) resolveReplication() (ReplicationResolved, error) {
 		backendTimeout = d
 	}
 
+	bandwidthLimit, err := parseBandwidth(rc.BandwidthLimit)
+	if err != nil {
+		return ReplicationResolved{}, fmt.Errorf("replication.bandwidth_limit: %w", err)
+	}
+
+	healthCheckInterval := 30 * time.Second
+	if rc.HealthCheckInterval != "" {
+		d, err := time.ParseDuration(rc.HealthCheckInterval)
+		if err != nil {
+			return ReplicationResolved{}, fmt.Errorf("replication.health_check_interval: %w", err)
+		}
+		healthCheckInterval = d
+	}
+	healthCheckTimeout := 10 * time.Second
+	if rc.HealthCheckTimeout != "" {
+		d, err := time.ParseDuration(rc.HealthCheckTimeout)
+		if err != nil {
+			return ReplicationResolved{}, fmt.Errorf("replication.health_check_timeout: %w", err)
+		}
+		healthCheckTimeout = d
+	}
+
 	return ReplicationResolved{
-		Workers:         workers,
-		RetryInterval:   retryInterval,
-		MaxRetries:      maxRetries,
-		Verify:          verify,
-		WriteQuiescence: writeQuiescence,
-		SweepInterval:   sweepInterval,
-		BackendTimeout:  backendTimeout,
+		Workers:             workers,
+		RetryInterval:       retryInterval,
+		MaxRetries:          maxRetries,
+		Verify:              verify,
+		WriteQuiescence:     writeQuiescence,
+		SweepInterval:       sweepInterval,
+		BackendTimeout:      backendTimeout,
+		BandwidthLimit:      bandwidthLimit,
+		HealthCheckInterval: healthCheckInterval,
+		HealthCheckTimeout:  healthCheckTimeout,
 	}, nil
 }
 
@@ -505,6 +536,30 @@ func (m MountConfig) MountCacheTimeouts() (entry, attr, negative time.Duration) 
 		}
 	}
 	return
+}
+
+// parseBandwidth parses a human-readable bandwidth string such as "50MiB/s"
+// and returns the value in bytes per second. An empty string or "unlimited"
+// returns 0 (no limit). The trailing "/s" is stripped (case-insensitive)
+// before delegating to parseCapacity for the numeric+unit part.
+func parseBandwidth(s string) (int64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" || strings.EqualFold(s, "unlimited") {
+		return 0, nil
+	}
+	// Strip trailing "/s" (case-insensitive).
+	upper := strings.ToUpper(s)
+	if strings.HasSuffix(upper, "/S") {
+		s = s[:len(s)-2]
+	}
+	cap, err := parseCapacity(s)
+	if err != nil {
+		return 0, fmt.Errorf("bandwidth_limit %q: %w", s, err)
+	}
+	if cap.Unlimited {
+		return 0, nil
+	}
+	return cap.Bytes, nil
 }
 
 // parseCapacity parses strings like "500GiB", "8TiB", "unlimited".

@@ -254,6 +254,20 @@ func (m *memMeta) EvictionCandidates(_ context.Context, tierName string, olderTh
 	return out, nil
 }
 
+func (m *memMeta) OldestAwaitingReplication(_ context.Context) (time.Time, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var oldest time.Time
+	for _, f := range m.files {
+		if f.State == domain.StateLocal {
+			if oldest.IsZero() || f.ModTime.Before(oldest) {
+				oldest = f.ModTime
+			}
+		}
+	}
+	return oldest, nil
+}
+
 // ListDir derives directory entries from stored files. It synthesises
 // virtual directories for intermediate path components.
 func (m *memMeta) ListDir(_ context.Context, dirPath string) ([]domain.FileInfo, error) {

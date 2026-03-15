@@ -92,6 +92,10 @@ type MetadataStore interface {
 	// FilesAwaitingReplication returns files in StateLocal with no in-flight sync.
 	FilesAwaitingReplication(ctx context.Context) ([]File, error)
 
+	// OldestAwaitingReplication returns the ModTime of the oldest file in StateLocal.
+	// Returns zero time if no files are awaiting replication.
+	OldestAwaitingReplication(ctx context.Context) (time.Time, error)
+
 	// EvictionCandidates returns synced files on tierName with arrived_at before olderThan.
 	EvictionCandidates(ctx context.Context, tierName string, olderThan time.Time) ([]File, error)
 

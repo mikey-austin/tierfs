@@ -290,7 +290,7 @@ function TopologyView({tierDefs,tierStats,backends,rules,metrics}){
 }
 
 // ── DASHBOARD ─────────────────────────────────────────────────────────────────
-function DashboardView({tierDefs,tierStats,totalFiles,globalStates,metrics,queue,wg}){
+function DashboardView({tierDefs,tierStats,totalFiles,globalStates,metrics,queue,wg,replLag}){
   const usage=useMemo(()=>{const u={};tierStats.forEach(t=>{u[t.name]=t.bytesUsed||0;});return u;},[tierStats]);
   const cnt=useMemo(()=>{const c={};tierStats.forEach(t=>{c[t.name]=t.fileCount||0;});return c;},[tierStats]);
   const states=globalStates;
@@ -304,6 +304,7 @@ function DashboardView({tierDefs,tierStats,totalFiles,globalStates,metrics,queue
         <SC label="Write Hdls"  value={wg.length}    sub="open" color={wg.length>0?T.cyan:T.text}/>
         <SC label="Write"       value={`${(last.backendWriteMBs||0).toFixed(0)}M/s`} sub="backend" color={T.amber}/>
         <SC label="Repl"        value={fmtRate(last.replBytesS||0)} color={T.cyan}/>
+        <SC label="Repl Lag"    value={replLag<60?`${replLag.toFixed(0)}s`:replLag<3600?`${(replLag/60).toFixed(0)}m`:`${(replLag/3600).toFixed(1)}h`} sub="oldest pending" color={replLag>300?T.red:replLag>60?T.amber:T.green}/>
         <SC label="FUSE ops"    value={`${(last.fuseOpRate||0).toFixed(0)}/s`}/>
       </div>
 
@@ -319,10 +320,10 @@ function DashboardView({tierDefs,tierStats,totalFiles,globalStates,metrics,queue
 
       <SHdr>Tier Storage</SHdr>
       <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:3,padding:"12px 14px",marginBottom:14}}>
-        {tierDefs.map((t,i)=>{const used=usage[t.name]||0,count=cnt[t.name]||0,pct=t.capacity?Math.min(1,used/t.capacity):0,c=pct>0.85?T.red:pct>0.7?T.amber:T.tierColors[i%T.tierColors.length];return(
+        {tierDefs.map((t,i)=>{const ts=tierStats.find(s=>s.name===t.name)||{};const used=usage[t.name]||0,count=cnt[t.name]||0,pct=t.capacity?Math.min(1,used/t.capacity):0,c=pct>0.85?T.red:pct>0.7?T.amber:T.tierColors[i%T.tierColors.length],healthy=ts.healthy!==false;return(
           <div key={t.name} style={{marginBottom:10}}>
             <div style={{display:"flex",justifyContent:"space-between",marginBottom:3,flexWrap:"wrap",gap:4}}>
-              <span style={{display:"flex",alignItems:"center",gap:7}}><span style={{width:6,height:6,borderRadius:"50%",background:T.tierColors[i%T.tierColors.length],display:"inline-block"}}/><span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:15,color:T.text}}>{t.name}</span><span style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:13,color:T.muted}}>{t.backend} · {count.toLocaleString()} files</span></span>
+              <span style={{display:"flex",alignItems:"center",gap:7}}><span style={{width:6,height:6,borderRadius:"50%",background:healthy?T.tierColors[i%T.tierColors.length]:T.red,boxShadow:healthy?"none":`0 0 6px ${T.red}`,display:"inline-block"}}/><span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:15,color:T.text}}>{t.name}</span><span style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:13,color:T.muted}}>{t.backend} · {count.toLocaleString()} files</span>{!healthy&&<Chip label="UNHEALTHY" color={T.red}/>}</span>
               <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:14,color:c}}>{t.capacity?`${fmtB(used)} / ${fmtB(t.capacity)}`:fmtB(used)}</span>
             </div>
             <div style={{height:4,background:T.border,borderRadius:2,overflow:"hidden"}}><div style={{height:"100%",width:`${t.capacity?pct*100:6}%`,background:c,borderRadius:2,transition:"width 0.8s"}}/></div>
@@ -565,15 +566,17 @@ function TiersView({tierDefs,tierStats,backends}){
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(195px,1fr))",gap:9,marginBottom:18}}>
         {tierDefs.map((t,i)=>{
           const be=backends.find(b=>b.name===t.backend);
+          const ts=tierStats.find(s=>s.name===t.name)||{};
           const used=usage[t.name]||0,count=cnt[t.name]||0;
           const pct=t.capacity?Math.min(1,used/t.capacity):0;
           const c=T.tierColors[i%T.tierColors.length];const bc=pct>0.85?T.red:pct>0.7?T.amber:c;
+          const healthy=ts.healthy!==false;
           return(
-            <div key={t.name} style={{background:T.card,border:`1px solid ${c}44`,borderRadius:3,padding:"13px 15px",position:"relative",overflow:"hidden"}}>
-              <div style={{position:"absolute",top:0,left:0,right:0,height:2,background:`linear-gradient(90deg,${c},${c}44)`}}/>
+            <div key={t.name} style={{background:T.card,border:`1px solid ${healthy?c:T.red}44`,borderRadius:3,padding:"13px 15px",position:"relative",overflow:"hidden"}}>
+              <div style={{position:"absolute",top:0,left:0,right:0,height:2,background:`linear-gradient(90deg,${healthy?c:T.red},${healthy?c:T.red}44)`}}/>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:9}}>
                 <div><div style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:18,fontWeight:500,color:c}}>{t.name}</div><div style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:13,color:T.muted,marginTop:1}}>P{t.priority} · {t.scheme}</div></div>
-                <Chip label="OK" color={T.green}/>
+                <Chip label={healthy?"OK":"DOWN"} color={healthy?T.green:T.red}/>
               </div>
               <div style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:12,color:T.muted,marginBottom:7,wordBreak:"break-all"}}>{be?.uri}</div>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:5,marginBottom:9}}>
@@ -638,6 +641,9 @@ export default function TierFSAdmin(){
     if (metricsRaw) addSnapshot(metricsRaw);
   }, [metricsRaw, addSnapshot]);
 
+  // Replication lag from Prometheus gauge.
+  const replLag = metricsRaw?.tierfs_replication_lag_seconds ?? 0;
+
   // Files awaiting replication (writing or local state).
   const awaitingRepl = useMemo(() =>
     files.filter(f => f.state === "writing" || f.state === "local").slice(0, 20),
@@ -652,6 +658,9 @@ export default function TierFSAdmin(){
 
   const last = metricsSnapshots[metricsSnapshots.length - 1] || {};
   const apiOk = !cfgError;
+  const allHealthy = tierStats.length > 0 && tierStats.every(t => t.healthy !== false);
+  const healthLabel = !apiOk ? "API ERROR" : !allHealthy ? "BACKEND DOWN" : replLag > 300 ? "REPL LAG" : "ALL OK";
+  const healthColor = !apiOk ? T.red : !allHealthy ? T.red : replLag > 300 ? T.amber : T.green;
 
   if (cfgLoading) {
     return (
@@ -673,8 +682,8 @@ export default function TierFSAdmin(){
       </div>
       {/* Health */}
       <div style={{padding:collapsed?"7px 0":"7px 12px",borderBottom:`1px solid ${T.border}`,display:"flex",alignItems:"center",justifyContent:collapsed?"center":"flex-start",gap:6,flexShrink:0}}>
-        <div style={{width:6,height:6,borderRadius:"50%",background:apiOk?T.green:T.red,boxShadow:`0 0 5px ${apiOk?T.green:T.red}`,flexShrink:0}}/>
-        {!collapsed&&<span style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:12,fontWeight:700,letterSpacing:"0.1em",color:apiOk?T.green:T.red}}>{apiOk?"CONNECTED":"API ERROR"}</span>}
+        <div style={{width:6,height:6,borderRadius:"50%",background:healthColor,boxShadow:`0 0 5px ${healthColor}`,flexShrink:0}}/>
+        {!collapsed&&<span style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:12,fontWeight:700,letterSpacing:"0.1em",color:healthColor}}>{healthLabel}</span>}
       </div>
       {/* Nav */}
       <nav style={{padding:"6px 0",flex:1,overflowY:"auto"}}>
@@ -760,7 +769,7 @@ export default function TierFSAdmin(){
 
           {/* Content */}
           <div style={{flex:1,overflow:"auto",padding:"12px 14px",WebkitOverflowScrolling:"touch"}}>
-            {view==="dashboard"   &&<DashboardView   tierDefs={tierDefs} tierStats={tierStats} totalFiles={totalFiles} globalStates={globalStates} metrics={metricsSnapshots} queue={queue} wg={wgEntries}/>}
+            {view==="dashboard"   &&<DashboardView   tierDefs={tierDefs} tierStats={tierStats} totalFiles={totalFiles} globalStates={globalStates} metrics={metricsSnapshots} queue={queue} wg={wgEntries} replLag={replLag}/>}
             {view==="topology"    &&<TopologyView     tierDefs={tierDefs} tierStats={tierStats} backends={backends} rules={rules} metrics={metricsSnapshots}/>}
             {view==="tiers"       &&<TiersView        tierDefs={tierDefs} tierStats={tierStats} backends={backends}/>}
             {view==="files"       &&<FilesView        tierDefs={tierDefs}/>}

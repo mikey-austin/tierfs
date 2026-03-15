@@ -255,3 +255,45 @@ func TestHottestTier(t *testing.T) {
 	hot := r.HottestTier()
 	assert.Equal(t, "tier0", hot.Name)
 }
+
+func TestResolve_BandwidthLimitParsing(t *testing.T) {
+	cases := []struct {
+		input string
+		want  int64
+	}{
+		{"50MiB/s", 50 * 1024 * 1024},
+		{"100MB/s", 100 * 1000 * 1000},
+		{"", 0},
+		{"unlimited", 0},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.input, func(t *testing.T) {
+			tomlStr := `
+[mount]
+path    = "/mnt"
+meta_db = "/tmp/meta.db"
+
+[replication]
+bandwidth_limit = "` + tc.input + `"
+
+[[backend]]
+name = "ssd"
+uri  = "file:///tmp"
+
+[[tier]]
+name     = "tier0"
+backend  = "ssd"
+priority = 0
+
+[[rule]]
+name  = "default"
+match = "**"
+`
+			path := writeConfig(t, tomlStr)
+			r, err := config.Load(path)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, r.Replication.BandwidthLimit)
+		})
+	}
+}
