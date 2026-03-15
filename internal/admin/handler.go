@@ -170,9 +170,16 @@ func sanitizeURI(raw string) string {
 // ── /api/v1/tiers ───────────────────────────────────────────────────────────
 
 type tierStatus struct {
-	Name      string `json:"name"`
-	FileCount int    `json:"fileCount"`
-	BytesUsed int64  `json:"bytesUsed"`
+	Name      string         `json:"name"`
+	FileCount int            `json:"fileCount"`
+	BytesUsed int64          `json:"bytesUsed"`
+	States    map[string]int `json:"states"`
+}
+
+type tiersResponse struct {
+	Tiers      []tierStatus   `json:"tiers"`
+	TotalFiles int            `json:"totalFiles"`
+	States     map[string]int `json:"states"`
 }
 
 func (h *Handler) handleTiers(w http.ResponseWriter, _ *http.Request) {
@@ -180,19 +187,46 @@ func (h *Handler) handleTiers(w http.ResponseWriter, _ *http.Request) {
 	defer cancel()
 
 	cfg := h.svc.Config()
-	out := make([]tierStatus, len(cfg.Tiers))
-	for i, t := range cfg.Tiers {
-		files, err := h.svc.Meta().FilesOnTier(ctx, t.Name)
-		ts := tierStatus{Name: t.Name}
-		if err == nil {
-			ts.FileCount = len(files)
-			for _, f := range files {
-				ts.BytesUsed += f.Size
-			}
-		}
-		out[i] = ts
+
+	// Fetch all files once and aggregate in memory.
+	allFiles, err := h.svc.Meta().ListFiles(ctx, "")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
-	writeJSON(w, out)
+
+	// Per-tier aggregation.
+	tierMap := make(map[string]*tierStatus, len(cfg.Tiers))
+	for _, t := range cfg.Tiers {
+		tierMap[t.Name] = &tierStatus{
+			Name:   t.Name,
+			States: make(map[string]int),
+		}
+	}
+
+	// Global state counts.
+	globalStates := make(map[string]int)
+
+	for _, f := range allFiles {
+		state := string(f.State)
+		globalStates[state]++
+		if ts, ok := tierMap[f.CurrentTier]; ok {
+			ts.FileCount++
+			ts.BytesUsed += f.Size
+			ts.States[state]++
+		}
+	}
+
+	tiers := make([]tierStatus, len(cfg.Tiers))
+	for i, t := range cfg.Tiers {
+		tiers[i] = *tierMap[t.Name]
+	}
+
+	writeJSON(w, tiersResponse{
+		Tiers:      tiers,
+		TotalFiles: len(allFiles),
+		States:     globalStates,
+	})
 }
 
 // ── /api/v1/files ───────────────────────────────────────────────────────────

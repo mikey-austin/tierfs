@@ -156,13 +156,13 @@ function useMetricsWindow(maxPoints = 120) {
 }
 
 // ── TOPOLOGY VIEW ─────────────────────────────────────────────────────────────
-function TopologyView({tierDefs,backends,rules,files,metrics}){
+function TopologyView({tierDefs,tierStats,backends,rules,metrics}){
   const[hov,setHov]=useState(null);
   const[anim,setAnim]=useState(0);
   useEffect(()=>{const t=setInterval(()=>setAnim(a=>(a+1)%100),60);return()=>clearInterval(t);},[]);
 
-  const usage=useMemo(()=>{const u={};tierDefs.forEach(t=>u[t.name]=0);files.forEach(f=>{if(f.currentTier in u)u[f.currentTier]+=f.size;});return u;},[files,tierDefs]);
-  const cnt=useMemo(()=>{const c={};files.forEach(f=>{c[f.currentTier]=(c[f.currentTier]||0)+1;});return c;},[files]);
+  const usage=useMemo(()=>{const u={};tierStats.forEach(t=>{u[t.name]=t.bytesUsed||0;});return u;},[tierStats]);
+  const cnt=useMemo(()=>{const c={};tierStats.forEach(t=>{c[t.name]=t.fileCount||0;});return c;},[tierStats]);
   const last=metrics[metrics.length-1]||{};
 
   const W=780,H=400,TW=140,TH=195,GAP=30;
@@ -290,15 +290,16 @@ function TopologyView({tierDefs,backends,rules,files,metrics}){
 }
 
 // ── DASHBOARD ─────────────────────────────────────────────────────────────────
-function DashboardView({tierDefs,files,metrics,queue,wg}){
-  const usage=useMemo(()=>{const u={};tierDefs.forEach(t=>u[t.name]=0);files.forEach(f=>{if(f.currentTier in u)u[f.currentTier]+=f.size;});return u;},[files,tierDefs]);
-  const states=files.reduce((a,f)=>{a[f.state]=(a[f.state]||0)+1;return a},{});
+function DashboardView({tierDefs,tierStats,totalFiles,globalStates,metrics,queue,wg}){
+  const usage=useMemo(()=>{const u={};tierStats.forEach(t=>{u[t.name]=t.bytesUsed||0;});return u;},[tierStats]);
+  const cnt=useMemo(()=>{const c={};tierStats.forEach(t=>{c[t.name]=t.fileCount||0;});return c;},[tierStats]);
+  const states=globalStates;
   const last=metrics[metrics.length-1]||{};
   return(
     <div>
       <SHdr>Overview</SHdr>
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(130px,1fr))",gap:7,marginBottom:14}}>
-        <SC label="Files"       value={files.length.toLocaleString()} sub={`${states.synced||0} synced`}/>
+        <SC label="Files"       value={totalFiles.toLocaleString()} sub={`${states.synced||0} synced`}/>
         <SC label="Queue"       value={queue.length} sub="replication jobs" color={queue.length>20?T.amber:T.text}/>
         <SC label="Write Hdls"  value={wg.length}    sub="open" color={wg.length>0?T.cyan:T.text}/>
         <SC label="Write"       value={`${(last.backendWriteMBs||0).toFixed(0)}M/s`} sub="backend" color={T.amber}/>
@@ -318,10 +319,10 @@ function DashboardView({tierDefs,files,metrics,queue,wg}){
 
       <SHdr>Tier Storage</SHdr>
       <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:3,padding:"12px 14px",marginBottom:14}}>
-        {tierDefs.map((t,i)=>{const used=usage[t.name]||0,pct=t.capacity?Math.min(1,used/t.capacity):0,c=pct>0.85?T.red:pct>0.7?T.amber:T.tierColors[i%T.tierColors.length];return(
+        {tierDefs.map((t,i)=>{const used=usage[t.name]||0,count=cnt[t.name]||0,pct=t.capacity?Math.min(1,used/t.capacity):0,c=pct>0.85?T.red:pct>0.7?T.amber:T.tierColors[i%T.tierColors.length];return(
           <div key={t.name} style={{marginBottom:10}}>
             <div style={{display:"flex",justifyContent:"space-between",marginBottom:3,flexWrap:"wrap",gap:4}}>
-              <span style={{display:"flex",alignItems:"center",gap:7}}><span style={{width:6,height:6,borderRadius:"50%",background:T.tierColors[i%T.tierColors.length],display:"inline-block"}}/><span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:15,color:T.text}}>{t.name}</span><span style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:13,color:T.muted}}>{t.backend}</span></span>
+              <span style={{display:"flex",alignItems:"center",gap:7}}><span style={{width:6,height:6,borderRadius:"50%",background:T.tierColors[i%T.tierColors.length],display:"inline-block"}}/><span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:15,color:T.text}}>{t.name}</span><span style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:13,color:T.muted}}>{t.backend} · {count.toLocaleString()} files</span></span>
               <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:14,color:c}}>{t.capacity?`${fmtB(used)} / ${fmtB(t.capacity)}`:fmtB(used)}</span>
             </div>
             <div style={{height:4,background:T.border,borderRadius:2,overflow:"hidden"}}><div style={{height:"100%",width:`${t.capacity?pct*100:6}%`,background:c,borderRadius:2,transition:"width 0.8s"}}/></div>
@@ -335,7 +336,7 @@ function DashboardView({tierDefs,files,metrics,queue,wg}){
           <div key={s} style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:3,padding:"10px 12px"}}>
             <div style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:12,fontWeight:700,letterSpacing:"0.15em",color:T.muted,textTransform:"uppercase"}}>{s}</div>
             <div style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:28,color:c,marginTop:3}}>{states[s]||0}</div>
-            <div style={{height:3,background:T.border,borderRadius:2,marginTop:5,overflow:"hidden"}}><div style={{height:"100%",width:`${files.length>0?((states[s]||0)/files.length*100).toFixed(0):0}%`,background:c,borderRadius:2}}/></div>
+            <div style={{height:3,background:T.border,borderRadius:2,marginTop:5,overflow:"hidden"}}><div style={{height:"100%",width:`${totalFiles>0?((states[s]||0)/totalFiles*100).toFixed(0):0}%`,background:c,borderRadius:2}}/></div>
           </div>
         ))}
       </div>
@@ -555,9 +556,9 @@ const NAV=[
 ];
 
 // Compact tiers view for the Tiers tab
-function TiersView({tierDefs,backends,files}){
-  const usage=useMemo(()=>{const u={};tierDefs.forEach(t=>u[t.name]=0);files.forEach(f=>{if(f.currentTier in u)u[f.currentTier]+=f.size;});return u;},[files,tierDefs]);
-  const cnt=useMemo(()=>{const c={};files.forEach(f=>{c[f.currentTier]=(c[f.currentTier]||0)+1;});return c;},[files]);
+function TiersView({tierDefs,tierStats,backends}){
+  const usage=useMemo(()=>{const u={};tierStats.forEach(t=>{u[t.name]=t.bytesUsed||0;});return u;},[tierStats]);
+  const cnt=useMemo(()=>{const c={};tierStats.forEach(t=>{c[t.name]=t.fileCount||0;});return c;},[tierStats]);
   return(
     <div>
       <SHdr>Tier Detail</SHdr>
@@ -614,6 +615,11 @@ export default function TierFSAdmin(){
   const rules = cfgData?.rules || [];
 
   // ── Poll live data ────────────────────────────────────────────────────────
+  const { data: tiersData } = useApi("/api/v1/tiers", 5000);
+  const tierStats = tiersData?.tiers || [];
+  const totalFiles = tiersData?.totalFiles || 0;
+  const globalStates = tiersData?.states || {};
+
   const { data: filesData } = useApi("/api/v1/files?limit=500", 10000);
   const files = filesData?.files || [];
 
@@ -754,9 +760,9 @@ export default function TierFSAdmin(){
 
           {/* Content */}
           <div style={{flex:1,overflow:"auto",padding:"12px 14px",WebkitOverflowScrolling:"touch"}}>
-            {view==="dashboard"   &&<DashboardView   tierDefs={tierDefs} files={files} metrics={metricsSnapshots} queue={queue} wg={wgEntries}/>}
-            {view==="topology"    &&<TopologyView     tierDefs={tierDefs} backends={backends} rules={rules} files={files} metrics={metricsSnapshots}/>}
-            {view==="tiers"       &&<TiersView        tierDefs={tierDefs} backends={backends} files={files}/>}
+            {view==="dashboard"   &&<DashboardView   tierDefs={tierDefs} tierStats={tierStats} totalFiles={totalFiles} globalStates={globalStates} metrics={metricsSnapshots} queue={queue} wg={wgEntries}/>}
+            {view==="topology"    &&<TopologyView     tierDefs={tierDefs} tierStats={tierStats} backends={backends} rules={rules} metrics={metricsSnapshots}/>}
+            {view==="tiers"       &&<TiersView        tierDefs={tierDefs} tierStats={tierStats} backends={backends}/>}
             {view==="files"       &&<FilesView        tierDefs={tierDefs}/>}
             {view==="replication" &&<ReplicationView  queue={queue} replMetrics={replMetrics} metrics={metricsSnapshots}/>}
             {view==="performance" &&<PerformanceView  metrics={metricsSnapshots}/>}
